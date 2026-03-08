@@ -45,7 +45,7 @@ Key properties:
 ### Requirements
 
 - Rust 1.85+ (edition 2024)
-- Linux (for TUN support) — macOS untested but should work
+- Linux / macOS / Windows
 
 ### Build
 
@@ -54,10 +54,10 @@ git clone https://github.com/AlexMelanFromRingo/yggdrasil-rs
 cd yggdrasil-rs
 
 # Linux / macOS
-cargo build --release --bin yggdrasil --features tun-support
+cargo build --release --bin yggdrasil --bin yggdrasilctl --features tun-support
 
-# Windows (requires wintun.dll next to the binary — download from https://wintun.net)
-cargo build --release --bin yggdrasil --features tun-support --target x86_64-pc-windows-gnu
+# Windows
+cargo build --release --bin yggdrasil --bin yggdrasilctl --features tun-support --target x86_64-pc-windows-msvc
 
 # Android shared library (requires cargo-ndk and Android NDK)
 cargo ndk --target aarch64-linux-android --platform 21 \
@@ -67,19 +67,64 @@ cargo ndk --target aarch64-linux-android --platform 21 \
 cargo build --release --features mobile --target aarch64-apple-ios
 ```
 
-### Generate a config
+### Install on Linux (systemd)
 
 ```bash
-./target/release/yggdrasil --genconf > /etc/yggdrasil.conf
+# 1. Build and copy binaries
+cargo build --release --features tun-support
+sudo cp target/release/yggdrasil /usr/local/bin/
+sudo cp target/release/yggdrasilctl /usr/local/bin/
+
+# 2. Generate config
+sudo yggdrasil --genconf > /etc/yggdrasil.conf
+
+# 3. Install systemd service
+sudo cp contrib/systemd/yggdrasil.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now yggdrasil
 ```
 
-### Run
+The systemd service uses `AmbientCapabilities=CAP_NET_ADMIN` so the daemon
+runs without root (no `setcap` required).
+
+### Manage with yggdrasilctl
 
 ```bash
-# Allow TUN creation without root
+# Show our own address and public key
+yggdrasilctl getself
+
+# List connected peers
+yggdrasilctl getpeers
+
+# Show spanning tree
+yggdrasilctl gettree
+
+# Show active sessions
+yggdrasilctl getsessions
+
+# Add a peer at runtime
+yggdrasilctl addpeer uri=tls://peer.example.com:443
+
+# Remove a peer
+yggdrasilctl removepeer uri=tls://peer.example.com:443
+```
+
+The admin socket path is configured via `AdminListen` in `yggdrasil.conf`
+(default: `unix:///tmp/ygg-admin.sock` on Linux/macOS,
+`tcp://localhost:9001` on Windows).
+
+### Manual run (development)
+
+```bash
+# Allow TUN creation without root (alternative to systemd AmbientCapabilities)
 sudo setcap cap_net_admin+eip ./target/release/yggdrasil
 
+# Run in foreground (logs to stderr)
 ./target/release/yggdrasil --useconffile /etc/yggdrasil.conf
+
+# Run in background (redirect logs)
+./target/release/yggdrasil --useconffile /etc/yggdrasil.conf \
+    2>/var/log/yggdrasil.log &
 ```
 
 ### Config example
@@ -226,14 +271,28 @@ The admin socket accepts newline-delimited JSON:
 | WebSocket | ✓ | ✓ (tokio-tungstenite) |
 | Linux TUN | ✓ (rtnetlink) | ✓ (rtnetlink) |
 | macOS TUN | ✓ (utun) | ✓ (ifconfig) |
-| Windows TUN | ✓ (wintun) | ✓ (wintun + netsh) |
+| Windows TUN | ✓ (wintun, embedded DLL) | ✓ (wintun, DLL required separately; netsh for IPv6 config) |
 | iOS/Android lib | ✓ (Go mobile) | ✓ (`--features mobile`, C FFI) |
 
 ### Windows notes
 
-- Requires `wintun.dll` in the same directory as the binary (download from [wintun.net](https://wintun.net))
+The TUN driver on Windows is [wintun](https://wintun.net), the same driver
+used by WireGuard and yggdrasil-go.
+
+**yggdrasil-go** embeds `wintun.dll` directly in the binary (via `go:embed`
+in wireguard-windows). **yggdrasil-rs** does not yet embed it — `wintun.dll`
+must be placed in the same directory as `yggdrasil.exe`. Download the DLL from
+[wintun.net](https://wintun.net) and copy `wintun.dll` (the architecture
+that matches your binary) next to the exe.
+
+This is a known gap. Embedding wintun.dll via `include_bytes!` + writing it
+to a temp file at startup is planned.
+
+Other Windows notes:
 - Run as Administrator (or grant `SeNetworkAdminPrivilege`)
-- Admin socket uses TCP (`tcp://localhost:9001`) instead of UNIX socket
+- Admin socket defaults to TCP (`tcp://localhost:9001`) instead of UNIX socket
+- IPv6 address is configured via `netsh` (subprocess); a direct WinAPI
+  approach via the `windows` crate (like yggdrasil-go's `winipcfg`) is planned
 
 ### iOS / Android notes
 

@@ -1,0 +1,38 @@
+[Unit]
+Description=Yggdrasil Network Daemon (Rust)
+Documentation=https://github.com/AlexMelanFromRingo/yggdrasil-rs
+After=network-pre.target
+Wants=network-pre.target
+Before=network.target
+
+[Service]
+# Run as a dedicated non-root user for isolation.
+# Create with: useradd -r -s /sbin/nologin yggdrasil
+User=root
+Group=root
+
+ExecStart=/usr/local/bin/yggdrasil --useconffile /etc/yggdrasil.conf
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Grant CAP_NET_ADMIN so the daemon can create and configure the TUN device
+# without running as root. Remove the User/Group lines above and create a
+# dedicated user (useradd -r yggdrasil) if you want full privilege separation.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+Restart=always
+RestartSec=5s
+TimeoutStopSec=5s
+
+# Logging: journald captures stderr automatically.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yggdrasil
+
+# Hardening
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/yggdrasil /run/yggdrasil
+
+[Install]
+WantedBy=multi-user.target
