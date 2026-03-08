@@ -289,7 +289,7 @@ The wire protocol is **100% identical** — yggdrasil-rs and yggdrasil-go intero
 | WebSocket | ✓ | ✓ (tokio-tungstenite) |
 | Linux TUN | ✓ (rtnetlink) | ✓ (rtnetlink) |
 | macOS TUN | ✓ (utun) | ✓ (ifconfig) |
-| Windows TUN | ✓ (wintun, DLL embedded) | ✓ (wintun, DLL required separately) |
+| Windows TUN | ✓ (wintun, DLL embedded) | ✓ (wintun, DLL embedded via `--features embedded-wintun`) |
 | iOS/Android lib | ✓ (Go mobile) | ✓ (`--features mobile`, C FFI) |
 | Config format | HJSON read + write | HJSON read, pretty JSON write |
 
@@ -298,16 +298,25 @@ The wire protocol is **100% identical** — yggdrasil-rs and yggdrasil-go intero
 The TUN driver on Windows is [wintun](https://wintun.net), the same driver
 used by WireGuard and yggdrasil-go.
 
-**yggdrasil-go** embeds `wintun.dll` directly in the binary (via `go:embed`
-in wireguard-windows). **yggdrasil-rs** does not yet embed it — `wintun.dll`
-must be placed in the same directory as `yggdrasil.exe`. Download the DLL from
-[wintun.net](https://wintun.net) and copy `wintun.dll` (the architecture
-that matches your binary) next to the exe.
+**With `--features embedded-wintun`** (recommended): `wintun.dll` is
+extracted from the binary into `%TEMP%\yggdrasil-rs\` at startup — no
+manual DLL placement needed. Place `contrib/windows/wintun.dll` before
+building:
+
+```bash
+cargo build --release --features tun-support,embedded-wintun --target x86_64-pc-windows-msvc
+```
+
+**Without `embedded-wintun`**: download `wintun.dll` from
+[wintun.net](https://wintun.net) and place it next to `yggdrasil.exe`.
+
+IPv6 address assignment uses the Windows IP Helper API
+(`CreateUnicastIpAddressEntry`) — the same approach as yggdrasil-go's
+`winipcfg`, not a `netsh` subprocess.
 
 Other Windows notes:
 - Run as Administrator (or grant `SeNetworkAdminPrivilege`)
 - Admin socket defaults to TCP (`tcp://localhost:9001`) instead of UNIX socket
-- IPv6 address is configured via `netsh` (subprocess)
 
 ### iOS / Android notes
 

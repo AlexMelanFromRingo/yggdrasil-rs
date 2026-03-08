@@ -460,7 +460,7 @@ impl Links {
             }
             "ws" => self.dial_ws(u).await,
             "wss" => self.dial_wss(u, options).await,
-            "unix" => Err(anyhow!("unix dial not supported for outbound")),
+            "unix" => self.dial_unix(u).await,
             s => Err(anyhow!("unknown scheme: {s}")),
         }
     }
@@ -609,6 +609,10 @@ impl Links {
         let request = tokio_tungstenite::tungstenite::http::Request::builder()
             .uri(ws_url.as_str())
             .header("Host", host_str)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
             .header("Sec-WebSocket-Protocol", "ygg-ws")
             .body(())
             .map_err(|e| anyhow!("WS request build: {e}"))?;
@@ -637,6 +641,10 @@ impl Links {
         let request = tokio_tungstenite::tungstenite::http::Request::builder()
             .uri(ws_url.as_str())
             .header("Host", host_str)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
             .header("Sec-WebSocket-Protocol", "ygg-ws")
             .body(())
             .map_err(|e| anyhow!("WSS request build: {e}"))?;
@@ -645,6 +653,24 @@ impl Links {
             .map_err(|e| anyhow!("WSS handshake {host_port}: {e}"))?;
 
         Ok(ws_bridge(ws))
+    }
+
+    // -----------------------------------------------------------------------
+    // UNIX socket dial (outbound, Linux/macOS)
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    async fn dial_unix(&self, u: &Url) -> Result<(BoxReader, BoxWriter)> {
+        let path = u.path();
+        let stream = tokio::net::UnixStream::connect(path).await
+            .map_err(|e| anyhow!("UNIX connect {path}: {e}"))?;
+        let (r, w) = tokio::io::split(stream);
+        Ok((Box::new(r), Box::new(w)))
+    }
+
+    #[cfg(not(unix))]
+    async fn dial_unix(&self, u: &Url) -> Result<(BoxReader, BoxWriter)> {
+        Err(anyhow!("UNIX sockets are not supported on this platform"))
     }
 
     // -----------------------------------------------------------------------

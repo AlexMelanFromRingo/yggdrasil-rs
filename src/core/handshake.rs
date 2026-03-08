@@ -205,7 +205,6 @@ mod tests {
         let encoded = meta.encode(&sk, b"testpassword").unwrap();
 
         let mut cursor = std::io::Cursor::new(&encoded);
-        use tokio::io::AsyncReadExt;
         let decoded = VersionMetadata::decode(&mut cursor, b"testpassword")
             .await
             .unwrap();
