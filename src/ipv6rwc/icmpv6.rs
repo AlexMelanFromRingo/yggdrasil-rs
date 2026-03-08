@@ -1,8 +1,6 @@
-/// ICMPv6 packet construction helpers.
-///
-/// Port of yggdrasil-go/src/ipv6rwc/icmpv6.go
-
-use std::net::Ipv6Addr;
+//! ICMPv6 packet construction helpers.
+//!
+//! Port of yggdrasil-go/src/ipv6rwc/icmpv6.go
 
 /// Creates an ICMPv6 "Packet Too Big" packet, including the IPv6 header.
 ///

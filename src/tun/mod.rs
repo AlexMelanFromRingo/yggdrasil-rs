@@ -1,9 +1,9 @@
-/// TUN adapter — reads/writes IPv6 packets to/from the OS network stack.
-///
-/// Port of yggdrasil-go/src/tun/tun.go + tun_linux.go
+//! TUN adapter — reads/writes IPv6 packets to/from the OS network stack.
+//!
+//! Port of yggdrasil-go/src/tun/tun.go + tun_linux.go
 
 use crate::{
-    address::{self, Address, Subnet},
+    address::Address,
     config::get_defaults,
     ipv6rwc::ReadWriteCloser,
 };
@@ -13,7 +13,13 @@ use std::{
     sync::{Arc, atomic::{AtomicBool, Ordering}},
 };
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
+#[cfg(not(any(
+    all(feature = "tun-support", target_os = "linux"),
+    all(feature = "tun-support", target_os = "macos"),
+    all(feature = "tun-support", target_os = "windows"),
+)))]
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Setup options
@@ -64,7 +70,6 @@ fn supported_mtu(mtu: u64) -> u64 {
 pub struct TunAdapter {
     rwc: Arc<ReadWriteCloser>,
     addr: Address,
-    subnet: Subnet,
     mtu: u64,
     name: String,
     is_open: AtomicBool,
@@ -84,14 +89,12 @@ impl TunAdapter {
         mtu: InterfaceMTU,
     ) -> Result<Arc<Self>> {
         let addr = rwc.address();
-        let subnet = rwc.subnet();
 
         let (ch_tx, ch_rx) = tokio::sync::mpsc::channel(4096);
 
         let tun = Arc::new(TunAdapter {
             rwc: Arc::clone(&rwc),
             addr,
-            subnet,
             mtu: mtu.0,
             name: name.0.clone(),
             is_open: AtomicBool::new(false),
@@ -188,10 +191,8 @@ impl TunAdapter {
                 if !this_w.is_enabled.load(Ordering::SeqCst) {
                     continue;
                 }
-                if let Err(e) = dev_w.send(&packet).await {
-                    if this_w.is_open.load(Ordering::SeqCst) {
-                        error!("TUN write error: {e}");
-                    }
+                if let Err(e) = dev_w.send(&packet).await && this_w.is_open.load(Ordering::SeqCst) {
+                    error!("TUN write error: {e}");
                 }
             }
         });
@@ -213,7 +214,7 @@ impl TunAdapter {
         // Create TUN device. Do NOT call config.address() with IPv6 — EINVAL.
         // IPv6 address is assigned separately via rtnetlink below.
         let mut config = tun2::Configuration::default();
-        config.name(actual_name.clone());
+        config.tun_name(actual_name.clone());
         config.mtu(mtu.min(65535) as u16);
 
         let device = tun2::create_as_async(&config)
@@ -256,7 +257,7 @@ impl TunAdapter {
         let ipv6_addr = Ipv6Addr::from(self.addr.0);
 
         let mut config = tun2::Configuration::default();
-        config.name(actual_name.clone());
+        config.tun_name(actual_name.clone());
         config.mtu(mtu.min(65535) as u16);
 
         let device = tun2::create_as_async(&config)
@@ -310,7 +311,7 @@ impl TunAdapter {
         ensure_wintun_dll()?;
 
         let mut config = tun2::Configuration::default();
-        config.name(actual_name.clone());
+        config.tun_name(actual_name.clone());
         config.mtu(mtu.min(65535) as u16);
 
         let device = tun2::create_as_async(&config)

@@ -1,6 +1,6 @@
-/// Core — Yggdrasil node lifecycle.
-///
-/// Port of yggdrasil-go/src/core/core.go + api.go
+//! Core — Yggdrasil node lifecycle.
+//!
+//! Port of yggdrasil-go/src/core/core.go + api.go
 
 pub mod api;
 pub mod handshake;
@@ -12,7 +12,7 @@ pub mod types;
 
 use crate::{address, config::NodeConfig, version};
 use anyhow::{anyhow, Result};
-use api::*;
+use api::{SelfInfo, PeerInfo, TreeEntryInfo, PathEntryInfo, SessionInfo};
 use ed25519_dalek::SigningKey;
 use ironwood_rs::{InboundPacket, PacketConn};
 use nodeinfo::NodeInfoHandler;
@@ -24,7 +24,6 @@ use std::{
 };
 use tokio::{sync::{Mutex, RwLock, mpsc}, task::JoinHandle};
 use tracing::info;
-use url::Url;
 
 /// The Yggdrasil node — manages the full lifecycle.
 pub struct Core {
@@ -32,11 +31,17 @@ pub struct Core {
     /// Shared link manager — all peers and listeners share this registry so
     /// that `retry_peers_now()` can signal all outbound links.
     links: Arc<link::Links>,
+    /// Keeps the ProtoHandler alive for the lifetime of the node.
+    #[allow(dead_code)]
     proto: Arc<ProtoHandler>,
+    /// ed25519 signing key kept for handshake use via NodeConfig.
+    #[allow(dead_code)]
     signing_key: SigningKey,
     public_key: [u8; 32],
     config: Arc<NodeConfig>,
     allowed_public_keys: RwLock<HashSet<[u8; 32]>>,
+    /// Keeps listeners alive until Core is dropped.
+    #[allow(dead_code)]
     listeners: Mutex<Vec<link::Listener>>,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Traffic packets dispatched from the background read loop.
@@ -96,7 +101,6 @@ impl Core {
 
         // Wire up protocol callbacks
         {
-            let pc = Arc::clone(&packet_conn);
             let core2 = Arc::clone(&core);
             let pc_send = Arc::clone(&packet_conn);
             proto
@@ -150,29 +154,24 @@ impl Core {
             let proto_clone = Arc::clone(&proto);
             let core_weak = Arc::downgrade(&core);
             let handle = tokio::spawn(async move {
-                loop {
-                    match pc.read_from().await {
-                        Ok(pkt) => {
-                            if pkt.payload.is_empty() {
-                                continue;
-                            }
-                            match pkt.payload[0] {
-                                types::TYPE_SESSION_TRAFFIC => {
-                                    // Forward to ipv6rwc / application
-                                    // (application calls Core::read_from())
-                                    if let Some(c) = core_weak.upgrade() {
-                                        c.deliver_packet(pkt).await;
-                                    }
-                                }
-                                types::TYPE_SESSION_PROTO => {
-                                    proto_clone
-                                        .handle_proto(pkt.from, &pkt.payload[1..])
-                                        .await;
-                                }
-                                _ => {}
+                while let Ok(pkt) = pc.read_from().await {
+                    if pkt.payload.is_empty() {
+                        continue;
+                    }
+                    match pkt.payload[0] {
+                        types::TYPE_SESSION_TRAFFIC => {
+                            // Forward to ipv6rwc / application
+                            // (application calls Core::read_from())
+                            if let Some(c) = core_weak.upgrade() {
+                                c.deliver_packet(pkt).await;
                             }
                         }
-                        Err(_) => break,
+                        types::TYPE_SESSION_PROTO => {
+                            proto_clone
+                                .handle_proto(pkt.from, &pkt.payload[1..])
+                                .await;
+                        }
+                        _ => {}
                     }
                 }
             });

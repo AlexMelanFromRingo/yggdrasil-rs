@@ -1,6 +1,6 @@
-/// Build metadata — injected at link time via RUSTFLAGS or build.rs.
-///
-/// Port of yggdrasil-go/src/version/version.go
+//! Build metadata — injected at link time via RUSTFLAGS or build.rs.
+//!
+//! Port of yggdrasil-go/src/version/version.go
 
 /// Returns the build name (e.g. "yggdrasil"), or `"unknown"`.
 pub fn build_name() -> &'static str {

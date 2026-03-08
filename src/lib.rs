@@ -1,6 +1,6 @@
-/// Yggdrasil — encrypted mesh networking in Rust.
-///
-/// Rust port of yggdrasil-go (https://github.com/yggdrasil-network/yggdrasil-go).
+//! Yggdrasil — encrypted mesh networking in Rust.
+//!
+//! Rust port of yggdrasil-go (https://github.com/yggdrasil-network/yggdrasil-go).
 
 pub mod address;
 pub mod admin;

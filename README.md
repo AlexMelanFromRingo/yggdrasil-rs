@@ -28,11 +28,11 @@ Key properties:
 - [x] Bloom filter multicast for path discovery
 - [x] Session encryption with double-ratchet key rotation + recovery
 - [x] TUN interface — **Linux** (rtnetlink), **macOS** (ifconfig), **Windows** (wintun/netsh)
-- [x] TCP, TLS, UNIX socket peer connections
+- [x] TCP, TLS, QUIC (quinn), WebSocket, UNIX socket peer connections
 - [x] SOCKS5 proxy support for outbound peers
 - [x] Multicast peer discovery (UDP `ff02::114:9001`)
 - [x] Admin socket (UNIX or TCP, JSON protocol)
-- [x] HJSON and JSON config files
+- [x] HJSON and JSON config files (reads HJSON/JSON, writes pretty JSON)
 - [x] `yggdrasilctl` admin CLI
 - [x] `genkeys` vanity key generator
 - [x] Intermediate mesh routing (forwards traffic for other nodes)
@@ -159,7 +159,7 @@ yggdrasil-rs/src/
 │   ├── mod.rs            — Core struct: lifecycle, API surface
 │   ├── api.rs            — SelfInfo, PeerInfo, TreeEntryInfo, SessionInfo
 │   ├── handshake.rs      — Peer handshake: version metadata wire format
-│   ├── link.rs           — Link manager: dial/listen TCP/TLS/UNIX/SOCKS
+│   ├── link.rs           — Link manager: TCP/TLS/QUIC/WebSocket/UNIX/SOCKS5
 │   ├── network.rs        — ★ Ironwood protocol (spanning tree, routing, sessions)
 │   ├── nodeinfo.rs       — NodeInfo protocol handler
 │   ├── options.rs        — SetupOption trait, peer/listen configuration types
@@ -170,6 +170,8 @@ yggdrasil-rs/src/
 ├── ipv6rwc/
 │   ├── mod.rs            — KeyStore, ReadWriteCloser (key ↔ IPv6 mapping)
 │   └── icmpv6.rs         — ICMPv6 Packet Too Big builder
+├── mobile/
+│   └── mod.rs            — C FFI layer for iOS/Android (--features mobile)
 ├── multicast/
 │   ├── mod.rs            — Multicast peer discovery (UDP ff02::114:9001)
 │   └── advertisement.rs  — Advertisement marshal/unmarshal
@@ -200,9 +202,9 @@ core::network::PacketConn::write_to()
     │      ↓ if no path: PathLookup flood via Bloom filter
     │  Traffic packet with embedded path
     │
-    └─ RouterState::send_traffic() → per-peer mpsc channel → TCP write
+    └─ RouterState::send_traffic() → per-peer mpsc channel → TCP/TLS/QUIC write
 
-TCP read → per-peer reader task
+TCP/TLS/QUIC read → per-peer reader task
     │  uvarint-framed wire packets
     ▼
 RouterState (dispatches by packet type)
@@ -240,10 +242,17 @@ Addresses fall in `200::/7`. Subnets are in `300::/7` (same derivation with `| 0
 When two nodes connect, they exchange a `VersionMetadata` frame:
 
 ```
-[magic (8B)] [major (uvarint)] [minor (uvarint)] [metadata_key (uvarint)] [metadata_value ...]
+4 bytes  "meta" magic (ASCII)
+2 bytes  remaining-length (big-endian u16) — covers TLV entries + signature
+TLV entries (each: 2-byte type, 2-byte length, N bytes value):
+  type 0 — major version (u16 BE)
+  type 1 — minor version (u16 BE)
+  type 2 — ed25519 public key (32 bytes)
+  type 3 — priority (u8)
+64 bytes  ed25519 signature over BLAKE2b-512(password || public_key)
 ```
 
-Magic: `0x0bad1de` (little-endian). Major version mismatch closes the connection.
+Major version mismatch closes the connection.
 
 ### Admin protocol
 
@@ -262,17 +271,27 @@ The admin socket accepts newline-delimited JSON:
 
 ## Differences from yggdrasil-go
 
+The wire protocol is **100% identical** — yggdrasil-rs and yggdrasil-go interoperate transparently. The differences below are internal implementation choices that have no effect on compatibility.
+
+### Internal implementation
+
 | Aspect | yggdrasil-go | yggdrasil-rs |
 |--------|-------------|--------------|
-| Actor model | `phony.Inbox` actor | `Arc<Mutex<RouterState>>` |
-| Timer model | `time.AfterFunc` | tokio `interval` task (1s) |
+| Concurrency model | `phony.Inbox` actor | `Arc<Mutex<RouterState>>` |
+| Timer model | `time.AfterFunc` | tokio `interval` task (1 s) |
 | Per-peer I/O | goroutine per peer | tokio task per peer + mpsc channel |
+
+### Feature matrix
+
+| Feature | yggdrasil-go | yggdrasil-rs |
+|---------|-------------|--------------|
 | QUIC | ✓ (quic-go) | ✓ (quinn) |
 | WebSocket | ✓ | ✓ (tokio-tungstenite) |
 | Linux TUN | ✓ (rtnetlink) | ✓ (rtnetlink) |
 | macOS TUN | ✓ (utun) | ✓ (ifconfig) |
-| Windows TUN | ✓ (wintun, embedded DLL) | ✓ (wintun, DLL required separately; netsh for IPv6 config) |
+| Windows TUN | ✓ (wintun, DLL embedded) | ✓ (wintun, DLL required separately) |
 | iOS/Android lib | ✓ (Go mobile) | ✓ (`--features mobile`, C FFI) |
+| Config format | HJSON read + write | HJSON read, pretty JSON write |
 
 ### Windows notes
 
@@ -285,14 +304,10 @@ must be placed in the same directory as `yggdrasil.exe`. Download the DLL from
 [wintun.net](https://wintun.net) and copy `wintun.dll` (the architecture
 that matches your binary) next to the exe.
 
-This is a known gap. Embedding wintun.dll via `include_bytes!` + writing it
-to a temp file at startup is planned.
-
 Other Windows notes:
 - Run as Administrator (or grant `SeNetworkAdminPrivilege`)
 - Admin socket defaults to TCP (`tcp://localhost:9001`) instead of UNIX socket
-- IPv6 address is configured via `netsh` (subprocess); a direct WinAPI
-  approach via the `windows` crate (like yggdrasil-go's `winipcfg`) is planned
+- IPv6 address is configured via `netsh` (subprocess)
 
 ### iOS / Android notes
 
@@ -301,8 +316,6 @@ Instead, the app feeds raw IPv6 packets via `ygg_write()` and reads decrypted
 packets via `ygg_read()`, bridging the OS VPN interface to the overlay.
 
 See `src/mobile/mod.rs` for the full C header, Swift example, and Kotlin/JNI example.
-
-Wire format is 100% identical — a yggdrasil-rs node interoperates transparently with yggdrasil-go nodes.
 
 ---
 

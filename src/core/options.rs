@@ -1,6 +1,6 @@
-/// Setup options passed to `Core::new()`.
-///
-/// Port of yggdrasil-go/src/core/options.go
+//! Setup options passed to `Core::new()`.
+//!
+//! Port of yggdrasil-go/src/core/options.go
 
 use std::net::IpAddr;
 

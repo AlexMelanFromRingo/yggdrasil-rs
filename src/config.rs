@@ -1,6 +1,6 @@
-/// Node configuration.
-///
-/// Port of yggdrasil-go/src/config/config.go
+//! Node configuration.
+//!
+//! Port of yggdrasil-go/src/config/config.go
 
 use anyhow::{anyhow, Result};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -331,7 +331,7 @@ impl NodeConfig {
 
         self.certificate = Some(TlsCertificate {
             cert_pem: cert.pem().into_bytes(),
-            key_pem: key_pem,
+            key_pem,
         });
         Ok(())
     }

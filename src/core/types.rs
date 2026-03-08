@@ -1,6 +1,6 @@
-/// In-band session packet type tags.
-///
-/// Port of yggdrasil-go/src/core/types.go
+//! In-band session packet type tags.
+//!
+//! Port of yggdrasil-go/src/core/types.go
 
 // Session-level packet types (first byte of payload from ironwood)
 pub const TYPE_SESSION_DUMMY: u8 = 0;

@@ -1,6 +1,6 @@
-/// IPv6 address and subnet derivation from ed25519 public keys.
-///
-/// Direct port of yggdrasil-go/src/address/address.go
+//! IPv6 address and subnet derivation from ed25519 public keys.
+//!
+//! Direct port of yggdrasil-go/src/address/address.go
 
 /// A 128-bit IPv6 address in the yggdrasil address range.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

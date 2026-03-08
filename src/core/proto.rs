@@ -1,25 +1,24 @@
-/// Protocol handler — nodeinfo + debug sub-protocol.
-///
-/// Port of yggdrasil-go/src/core/proto.go (and debug.go / nodeinfo.go)
+//! Protocol handler — nodeinfo + debug sub-protocol.
+//!
+//! Port of yggdrasil-go/src/core/proto.go (and debug.go / nodeinfo.go)
 
 use crate::core::{types::*, nodeinfo::NodeInfoHandler};
-use anyhow::Result;
-use hex;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
 
 type KeyArray = [u8; 32];
 
+type SendFn = Mutex<Option<Box<dyn Fn(Vec<u8>, KeyArray) + Send + Sync>>>;
+type GetSelfFn = Mutex<Option<Box<dyn Fn() -> (KeyArray, u64) + Send + Sync>>>;
+type GetPeersFn = Mutex<Option<Box<dyn Fn() -> Vec<KeyArray> + Send + Sync>>>;
+type GetTreeFn = Mutex<Option<Box<dyn Fn() -> Vec<KeyArray> + Send + Sync>>>;
+
 /// Callback stored for a pending debug request.
 struct ReqInfo {
     callback: Box<dyn FnOnce(Vec<u8>) + Send>,
-    deadline: Instant,
 }
 
 /// Handles all in-band protocol packets (nodeinfo requests/responses, debug).
@@ -29,10 +28,10 @@ pub struct ProtoHandler {
     peers_requests: Mutex<HashMap<KeyArray, ReqInfo>>,
     tree_requests: Mutex<HashMap<KeyArray, ReqInfo>>,
     // Injected by Core after construction
-    send_fn: Mutex<Option<Box<dyn Fn(Vec<u8>, KeyArray) + Send + Sync>>>,
-    get_self_fn: Mutex<Option<Box<dyn Fn() -> (KeyArray, u64) + Send + Sync>>>,
-    get_peers_fn: Mutex<Option<Box<dyn Fn() -> Vec<KeyArray> + Send + Sync>>>,
-    get_tree_fn: Mutex<Option<Box<dyn Fn() -> Vec<KeyArray> + Send + Sync>>>,
+    send_fn: SendFn,
+    get_self_fn: GetSelfFn,
+    get_peers_fn: GetPeersFn,
+    get_tree_fn: GetTreeFn,
     mtu_fn: Mutex<Option<Box<dyn Fn() -> u64 + Send + Sync>>>,
 }
 
@@ -213,11 +212,10 @@ impl ProtoHandler {
                 key,
                 ReqInfo {
                     callback: Box::new(cb),
-                    deadline: Instant::now() + Duration::from_secs(60),
                 },
             );
         }
-        let mut payload = vec![TYPE_SESSION_PROTO, TYPE_PROTO_DEBUG, TYPE_DEBUG_GET_SELF_REQUEST];
+        let payload = vec![TYPE_SESSION_PROTO, TYPE_PROTO_DEBUG, TYPE_DEBUG_GET_SELF_REQUEST];
         self.send(payload, key).await;
     }
 
@@ -232,11 +230,10 @@ impl ProtoHandler {
                 key,
                 ReqInfo {
                     callback: Box::new(cb),
-                    deadline: Instant::now() + Duration::from_secs(60),
                 },
             );
         }
-        let mut payload = vec![TYPE_SESSION_PROTO, TYPE_PROTO_DEBUG, TYPE_DEBUG_GET_PEERS_REQUEST];
+        let payload = vec![TYPE_SESSION_PROTO, TYPE_PROTO_DEBUG, TYPE_DEBUG_GET_PEERS_REQUEST];
         self.send(payload, key).await;
     }
 
@@ -251,11 +248,10 @@ impl ProtoHandler {
                 key,
                 ReqInfo {
                     callback: Box::new(cb),
-                    deadline: Instant::now() + Duration::from_secs(60),
                 },
             );
         }
-        let mut payload = vec![TYPE_SESSION_PROTO, TYPE_PROTO_DEBUG, TYPE_DEBUG_GET_TREE_REQUEST];
+        let payload = vec![TYPE_SESSION_PROTO, TYPE_PROTO_DEBUG, TYPE_DEBUG_GET_TREE_REQUEST];
         self.send(payload, key).await;
     }
 }

@@ -1,13 +1,13 @@
-/// Yggdrasil admin CLI tool.
-///
-/// Port of yggdrasil-go/cmd/yggdrasilctl/main.go
+//! Yggdrasil admin CLI tool.
+//!
+//! Port of yggdrasil-go/cmd/yggdrasilctl/main.go
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
     net::TcpStream,
     os::unix::net::UnixStream,
     time::Duration,
@@ -148,7 +148,7 @@ where
     Ok((resp, name))
 }
 
-fn print_response(command: &str, resp: &Value, borders: bool) -> Result<()> {
+fn print_response(command: &str, resp: &Value, _borders: bool) -> Result<()> {
     match command.to_lowercase().as_str() {
         "getself" => {
             if let Some(obj) = resp.as_object() {
@@ -165,7 +165,7 @@ fn print_response(command: &str, resp: &Value, borders: bool) -> Result<()> {
                     println!("No peers connected.");
                     return Ok(());
                 }
-                println!("{:<50} {:<5} {:<4} {:<10} {:<10} {}", "URI", "State", "Dir", "RX", "TX", "Error");
+                println!("{:<50} {:<5} {:<4} {:<10} {:<10} Error", "URI", "State", "Dir", "RX", "TX");
                 for peer in peers {
                     let uri = peer.get("uri").and_then(|v| v.as_str()).unwrap_or("-");
                     let up = peer.get("up").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -183,7 +183,7 @@ fn print_response(command: &str, resp: &Value, borders: bool) -> Result<()> {
         }
         "gettree" => {
             if let Some(tree) = resp.get("tree").and_then(|t| t.as_array()) {
-                println!("{:<66} {:<42} {}", "Public Key", "IP Address", "Sequence");
+                println!("{:<66} {:<42} Sequence", "Public Key", "IP Address");
                 for entry in tree {
                     let pk = entry.get("public_key").and_then(|v| v.as_str()).unwrap_or("-");
                     let ip = entry.get("ip_address").and_then(|v| v.as_str()).unwrap_or("-");
@@ -204,7 +204,7 @@ fn print_response(command: &str, resp: &Value, borders: bool) -> Result<()> {
         }
         "list" => {
             if let Some(list) = resp.get("list").and_then(|l| l.as_array()) {
-                println!("{:<30} {:<40} {}", "Command", "Description", "Fields");
+                println!("{:<30} {:<40} Fields", "Command", "Description");
                 println!("{}", "-".repeat(100));
                 for entry in list {
                     let cmd = entry.get("command").and_then(|v| v.as_str()).unwrap_or("-");

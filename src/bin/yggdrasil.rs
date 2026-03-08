@@ -1,11 +1,9 @@
-/// Yggdrasil node daemon.
-///
-/// Port of yggdrasil-go/cmd/yggdrasil/main.go
+//! Yggdrasil node daemon.
+//!
+//! Port of yggdrasil-go/cmd/yggdrasil/main.go
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use rustls;
-use hex;
 use std::{
     io::Read,
     net::Ipv6Addr,
@@ -18,7 +16,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 use yggdrasil_rs::{
     address,
     admin::AdminSocket,
-    config::{NodeConfig, get_defaults},
+    config::NodeConfig,
     core::Core,
     ipv6rwc::ReadWriteCloser,
     multicast::{Multicast, MulticastInterface},
@@ -102,7 +100,7 @@ async fn main() -> Result<()> {
 
     // Set up logging — include both the library crate (yggdrasil_rs) and
     // this binary crate (yggdrasil) so all info!() calls are visible.
-    let filter = EnvFilter::try_new(&format!(
+    let filter = EnvFilter::try_new(format!(
         "yggdrasil_rs={0},yggdrasil={0}",
         args.loglevel
     ))
@@ -130,11 +128,7 @@ async fn main() -> Result<()> {
     // --genconf
     if args.genconf {
         cfg.admin_listen = String::new();
-        let out = if args.json {
-            cfg.to_json()?
-        } else {
-            cfg.to_json()? // HJSON output; full hjson serialiser would go here
-        };
+        let out = cfg.to_json()?;
         println!("{out}");
         return Ok(());
     }
@@ -258,10 +252,8 @@ async fn main() -> Result<()> {
     signal::ctrl_c().await?;
     info!("Shutting down...");
 
-    if let Some(ref t) = tun {
-        if let Err(e) = t.stop().await {
-            error!("TUN stop error: {e}");
-        }
+    if let Some(ref t) = tun && let Err(e) = t.stop().await {
+        error!("TUN stop error: {e}");
     }
     if let Some(ref a) = admin {
         a.stop().await;

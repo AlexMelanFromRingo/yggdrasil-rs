@@ -1,16 +1,16 @@
-/// Yggdrasil connection handshake — version metadata.
-///
-/// Port of yggdrasil-go/src/core/version.go
-///
-/// Wire format:
-///   4 bytes  "meta" magic
-///   2 bytes  remaining-length (big-endian u16) — covers TLV entries + signature
-///   TLV entries (each: 2-byte type, 2-byte length, N bytes value):
-///     type 0 — major version (u16 BE)
-///     type 1 — minor version (u16 BE)
-///     type 2 — ed25519 public key (32 bytes)
-///     type 3 — priority (u8)
-///   64 bytes  ed25519 signature over BLAKE2b-512(password)(public_key)
+//! Yggdrasil connection handshake — version metadata.
+//!
+//! Port of yggdrasil-go/src/core/version.go
+//!
+//! Wire format:
+//!   4 bytes  "meta" magic
+//!   2 bytes  remaining-length (big-endian u16) — covers TLV entries + signature
+//!   TLV entries (each: 2-byte type, 2-byte length, N bytes value):
+//!     type 0 — major version (u16 BE)
+//!     type 1 — minor version (u16 BE)
+//!     type 2 — ed25519 public key (32 bytes)
+//!     type 3 — priority (u8)
+//!   64 bytes  ed25519 signature over BLAKE2b-512(password)(public_key)
 
 use anyhow::{anyhow, Result};
 use blake2::Blake2b512;

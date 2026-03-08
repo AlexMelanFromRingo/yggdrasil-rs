@@ -1,6 +1,6 @@
-/// Multicast peer discovery.
-///
-/// Port of yggdrasil-go/src/multicast/multicast.go
+//! Multicast peer discovery.
+//!
+//! Port of yggdrasil-go/src/multicast/multicast.go
 
 pub mod advertisement;
 
@@ -13,7 +13,6 @@ use anyhow::{anyhow, Result};
 use blake2::Blake2b512;
 use hex;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
@@ -25,11 +24,10 @@ use std::{
 };
 use tokio::{
     net::UdpSocket,
-    sync::{Mutex, RwLock},
+    sync::Mutex,
     time::sleep,
 };
 use tracing::{debug, info, warn};
-use url::Url;
 
 // Multicast group address used by Yggdrasil
 const MULTICAST_GROUP: &str = "[ff02::114]:9001";
@@ -52,6 +50,7 @@ pub struct MulticastInterface {
 // Internal state
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 struct InterfaceInfo {
     iface_name: String,
     addrs: Vec<Ipv6Addr>,
@@ -63,6 +62,7 @@ struct InterfaceInfo {
     hash: Vec<u8>,
 }
 
+#[allow(dead_code)]
 struct ListenerInfo {
     port: u16,
     started_at: Instant,
@@ -190,7 +190,7 @@ impl Multicast {
         self.running.load(Ordering::SeqCst)
     }
 
-    async fn listen_loop(&self, socket: Arc<UdpSocket>, group_addr: SocketAddrV6) {
+    async fn listen_loop(&self, socket: Arc<UdpSocket>, _group_addr: SocketAddrV6) {
         let pk = self.core.public_key();
         let mut buf = vec![0u8; 2048];
 
@@ -292,7 +292,7 @@ impl Multicast {
                 // Ensure we have a listener for this interface
                 let listener_port = self.ensure_listener(name, info).await;
 
-                for addr in &info.addrs {
+                for _addr in &info.addrs {
                     let adv = MulticastAdvertisement {
                         major_version: PROTOCOL_VERSION_MAJOR,
                         minor_version: PROTOCOL_VERSION_MINOR,
@@ -302,7 +302,7 @@ impl Multicast {
                     };
                     let payload = adv.marshal_binary();
                     let dst = SocketAddrV6::new(
-                        group_addr.ip().clone(),
+                        *group_addr.ip(),
                         group_addr.port(),
                         0,
                         // Use the interface index as scope_id

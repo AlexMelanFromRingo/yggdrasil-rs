@@ -1,6 +1,6 @@
-/// Multicast beacon advertisement — binary encoding/decoding.
-///
-/// Port of yggdrasil-go/src/multicast/advertisement.go
+//! Multicast beacon advertisement — binary encoding/decoding.
+//!
+//! Port of yggdrasil-go/src/multicast/advertisement.go
 
 use anyhow::{anyhow, Result};
 

@@ -1,6 +1,6 @@
-/// IPv6 ReadWriteCloser — maps Yggdrasil public keys to IPv6 addresses.
-///
-/// Port of yggdrasil-go/src/ipv6rwc/ipv6rwc.go
+//! IPv6 ReadWriteCloser — maps Yggdrasil public keys to IPv6 addresses.
+//!
+//! Port of yggdrasil-go/src/ipv6rwc/ipv6rwc.go
 
 pub mod icmpv6;
 
@@ -18,12 +18,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{
-    sync::{Mutex, RwLock},
-    time::timeout,
-};
+use tokio::sync::Mutex;
 use tracing::debug;
 
+#[allow(dead_code)]
 const KEY_STORE_TIMEOUT: Duration = Duration::from_secs(120);
 
 type KeyArray = [u8; 32];
@@ -35,6 +33,7 @@ struct KeyInfo {
     last_seen: Mutex<Instant>,
 }
 
+#[allow(dead_code)]
 struct BufferedPacket {
     data: Vec<u8>,
     queued_at: Instant,
@@ -95,7 +94,7 @@ impl KeyStore {
             return Arc::clone(&info);
         }
 
-        let key_pub = ed25519_dalek::VerifyingKey::from_bytes(key).ok();
+        let _key_pub = ed25519_dalek::VerifyingKey::from_bytes(key).ok();
         let addr = address::addr_for_key(key).unwrap_or(Address([0u8; 16]));
         let subnet = address::subnet_for_key(key).unwrap_or(Subnet([0u8; 8]));
 
@@ -275,7 +274,8 @@ impl KeyStore {
 
 pub struct ReadWriteCloser {
     store: Arc<KeyStore>,
-    // Buffered inbound packet queue
+    /// Buffered inbound packet queue (reserved for future buffered-read API).
+    #[allow(dead_code)]
     rx_buf: Mutex<Vec<u8>>,
 }
 

@@ -1,6 +1,6 @@
-/// Public API types returned by Core.
-///
-/// Port of yggdrasil-go/src/core/api.go
+//! Public API types returned by Core.
+//!
+//! Port of yggdrasil-go/src/core/api.go
 
 use std::time::Duration;
 

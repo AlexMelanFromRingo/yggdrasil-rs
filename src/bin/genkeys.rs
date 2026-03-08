@@ -1,13 +1,12 @@
-/// Yggdrasil vanity key generator.
-///
-/// Port of yggdrasil-go/cmd/genkeys/main.go
-///
-/// Generates ed25519 keys in parallel; prints each new "better" key found.
-/// "Better" means a lower raw public key (more leading 0-bits) which yields
-/// a higher NodeID (more leading 1-bits in inverted key) → higher IP address.
+//! Yggdrasil vanity key generator.
+//!
+//! Port of yggdrasil-go/cmd/genkeys/main.go
+//!
+//! Generates ed25519 keys in parallel; prints each new "better" key found.
+//! "Better" means a lower raw public key (more leading 0-bits) which yields
+//! a higher NodeID (more leading 1-bits in inverted key) → higher IP address.
 
 use ed25519_dalek::SigningKey;
-use hex;
 use rand::rngs::OsRng;
 use std::{
     net::Ipv6Addr,
@@ -87,12 +86,7 @@ fn main() {
     }
     drop(tx);
 
-    loop {
-        let key = match rx.recv() {
-            Ok(k) => k,
-            Err(_) => break,
-        };
-
+    while let Ok(key) = rx.recv() {
         if first || is_better(&current_best, &key.pub_key) {
             total_keys += key.count;
             current_best = key.pub_key;

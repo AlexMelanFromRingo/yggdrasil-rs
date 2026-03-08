@@ -1,15 +1,14 @@
-/// Admin socket — JSON-over-TCP/UNIX API.
-///
-/// Port of yggdrasil-go/src/admin/admin.go and the handler files.
+//! Admin socket — JSON-over-TCP/UNIX API.
+//!
+//! Port of yggdrasil-go/src/admin/admin.go and the handler files.
 
-use crate::core::{self, Core, AddHandlerFunc, api::*};
+use crate::core::{Core, AddHandlerFunc};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -488,7 +487,7 @@ impl AdminSocket {
         // getPeers
         {
             let core = Arc::clone(&self.core);
-            this.add_handler("getPeers", "Show directly connected peers", vec!["sort"], move |args| {
+            this.add_handler("getPeers", "Show directly connected peers", vec!["sort"], move |_args| {
                 let peers = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(core.get_peers())
                 });
@@ -625,6 +624,3 @@ impl AdminSocket {
     }
 }
 
-struct AdminHandlerContext<'a> {
-    handlers: &'a RwLock<HashMap<String, Handler>>,
-}

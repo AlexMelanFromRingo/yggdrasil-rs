@@ -1,7 +1,7 @@
-/// Link management — dial and listen for peer connections.
-///
-/// Port of yggdrasil-go/src/core/link.go + link_tcp.go / link_tls.go /
-/// link_quic.go / link_ws.go / link_wss.go / link_socks.go / link_unix.go
+//! Link management — dial and listen for peer connections.
+//!
+//! Port of yggdrasil-go/src/core/link.go + link_tcp.go / link_tls.go /
+//! link_quic.go / link_ws.go / link_wss.go / link_socks.go / link_unix.go
 
 use crate::core::handshake::VersionMetadata;
 use ironwood_rs::{BoxReader, BoxWriter, PacketConn, PublicKeyBytes};
@@ -75,9 +75,6 @@ impl Listener {
 /// Internal state for a persistent outbound link.
 #[derive(Debug)]
 struct LinkState {
-    link_type: LinkType,
-    // URI without query string
-    uri: String,
     last_error: Option<String>,
     connected: bool,
     // Signal to abort backoff and reconnect immediately
@@ -123,8 +120,6 @@ impl Links {
         links.insert(
             link_uri.clone(),
             LinkState {
-                link_type,
-                uri: link_uri.clone(),
                 last_error: None,
                 connected: false,
                 kick_tx,
@@ -229,9 +224,9 @@ impl Links {
     pub async fn remove(&self, uri: &str) -> Result<()> {
         let link_uri = strip_query(uri);
         let mut links = self.links.write().await;
-        if links.remove(&link_uri).is_none() {
-            return Err(anyhow!("peer is not configured"));
-        }
+        let state = links.remove(&link_uri).ok_or_else(|| anyhow!("peer is not configured"))?;
+        // Signal the reconnect loop to stop.
+        let _ = state.cancel_tx.send(());
         Ok(())
     }
 
@@ -260,7 +255,7 @@ impl Links {
     async fn listen_tcp(
         self: &Arc<Self>,
         u: &Url,
-        sintf: &str,
+        _sintf: &str,
         options: &LinkOptions,
         local: bool,
     ) -> Result<Listener> {
@@ -306,7 +301,7 @@ impl Links {
     async fn listen_tls(
         self: &Arc<Self>,
         u: &Url,
-        sintf: &str,
+        _sintf: &str,
         options: &LinkOptions,
         local: bool,
     ) -> Result<Listener> {
@@ -836,10 +831,8 @@ impl Links {
         }
 
         // Check pinned keys
-        if !options.pinned_keys.is_empty() {
-            if !options.pinned_keys.contains(&meta_in.public_key) {
-                return Err(anyhow!("remote public key not in pinned key list"));
-            }
+        if !options.pinned_keys.is_empty() && !options.pinned_keys.contains(&meta_in.public_key) {
+            return Err(anyhow!("remote public key not in pinned key list"));
         }
 
         Ok(meta_in)
@@ -858,7 +851,7 @@ impl Links {
         if !local {
             let allowed = &self.node_config.allowed_public_keys;
             if !allowed.is_empty() {
-                let hex_key = hex::encode(&meta.public_key);
+                let hex_key = hex::encode(meta.public_key);
                 if !allowed.iter().any(|k| k == &hex_key) {
                     return Err(anyhow!(
                         "public key {} not in AllowedPublicKeys",
@@ -954,7 +947,7 @@ fn ws_bridge<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         if ws_tx
-                            .send(Message::Binary(buf[..n].to_vec().into()))
+                            .send(Message::Binary(buf[..n].to_vec()))
                             .await
                             .is_err()
                         {
@@ -1021,12 +1014,8 @@ fn parse_link_options(u: &Url) -> Result<LinkOptions> {
     }
 
     // If no explicit SNI, use the URI host if it's not an IP
-    if opts.tls_sni.is_empty() {
-        if let Some(host) = u.host_str() {
-            if host.parse::<IpAddr>().is_err() {
-                opts.tls_sni = host.to_string();
-            }
-        }
+    if opts.tls_sni.is_empty() && let Some(host) = u.host_str() && host.parse::<IpAddr>().is_err() {
+        opts.tls_sni = host.to_string();
     }
 
     Ok(opts)

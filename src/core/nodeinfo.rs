@@ -1,8 +1,7 @@
-/// NodeInfo — fetching and caching node metadata from remote nodes.
-///
-/// Port of yggdrasil-go/src/core/nodeinfo.go
+//! NodeInfo — fetching and caching node metadata from remote nodes.
+//!
+//! Port of yggdrasil-go/src/core/nodeinfo.go
 
-use crate::core::types::*;
 use anyhow::Result;
 use serde_json::Value;
 use std::{
@@ -10,7 +9,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 
 use crate::version;
 
