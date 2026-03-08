@@ -5,7 +5,6 @@
 pub mod api;
 pub mod handshake;
 pub mod link;
-pub mod network;
 pub mod nodeinfo;
 pub mod options;
 pub mod proto;
@@ -15,7 +14,7 @@ use crate::{address, config::NodeConfig, version};
 use anyhow::{anyhow, Result};
 use api::*;
 use ed25519_dalek::SigningKey;
-use network::{InboundPacket, PacketConn};
+use ironwood_rs::{InboundPacket, PacketConn};
 use nodeinfo::NodeInfoHandler;
 use proto::ProtoHandler;
 use std::{

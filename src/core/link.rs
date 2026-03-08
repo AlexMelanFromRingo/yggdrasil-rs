@@ -4,7 +4,7 @@
 /// link_quic.go / link_ws.go / link_wss.go / link_socks.go / link_unix.go
 
 use crate::core::handshake::VersionMetadata;
-use crate::core::network::{BoxReader, BoxWriter, PacketConn, PublicKeyBytes};
+use ironwood_rs::{BoxReader, BoxWriter, PacketConn, PublicKeyBytes};
 use crate::config::NodeConfig;
 use anyhow::{anyhow, Result};
 use hex;

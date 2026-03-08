@@ -292,49 +292,37 @@ impl TunAdapter {
 
     /// Windows TUN setup via wintun driver.
     ///
-    /// **Requirement**: `wintun.dll` must be placed in the same directory as the
-    /// binary. Download from <https://wintun.net>.
+    /// Uses the Windows IP Helper API (`CreateUnicastIpAddressEntry`) to assign
+    /// the IPv6 address — matching yggdrasil-go's winipcfg approach and avoiding
+    /// the fragile `netsh` subprocess.
     ///
-    /// The process must be run as Administrator (or have SeNetworkAdminPrivilege).
-    /// IPv6 address is configured via `netsh interface ipv6`.
+    /// If the `embedded-wintun` feature is enabled, `wintun.dll` is extracted
+    /// from the binary into `%TEMP%\yggdrasil-rs\` at startup. Otherwise the
+    /// DLL must be placed next to the executable (download from wintun.net).
     #[cfg(all(feature = "tun-support", target_os = "windows"))]
     async fn setup_tun(self: &Arc<Self>, if_name: String, mtu: u64) -> Result<()> {
         let actual_name = if if_name == "auto" { "Yggdrasil".to_string() } else { if_name };
         let ipv6_addr = Ipv6Addr::from(self.addr.0);
 
-        // tun2 on Windows uses the wintun driver automatically.
+        // If embedded-wintun feature is on, extract the DLL and add its
+        // directory to the DLL search path before tun2 initializes.
+        #[cfg(feature = "embedded-wintun")]
+        ensure_wintun_dll()?;
+
         let mut config = tun2::Configuration::default();
         config.name(actual_name.clone());
         config.mtu(mtu.min(65535) as u16);
 
         let device = tun2::create_as_async(&config)
-            .map_err(|e| anyhow!("failed to create TUN device (is wintun.dll present?): {e}"))?;
+            .map_err(|e| anyhow!(
+                "failed to create TUN device: {e}\n\
+                 Hint: if not using --features embedded-wintun, place wintun.dll \
+                 next to the binary (download from https://wintun.net)"
+            ))?;
 
-        // Assign IPv6 address via netsh
-        let addr_str = format!("{ipv6_addr}");
-        let output = std::process::Command::new("netsh")
-            .args([
-                "interface", "ipv6", "add", "address",
-                &actual_name,
-                &format!("{addr_str}/7"),
-            ])
-            .output()
-            .map_err(|e| anyhow!("netsh failed: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("netsh add address failed: {stderr}"));
-        }
-
-        // Set MTU via netsh
-        let _ = std::process::Command::new("netsh")
-            .args([
-                "interface", "ipv6", "set", "subinterface",
-                &actual_name,
-                &format!("mtu={mtu}"),
-                "store=active",
-            ])
-            .output();
+        // Assign IPv6 address via Windows IP Helper API (CreateUnicastIpAddressEntry).
+        windows_add_ipv6_address(&actual_name, ipv6_addr, 7)
+            .map_err(|e| anyhow!("failed to assign IPv6 address: {e}"))?;
 
         info!("Interface name: {actual_name}");
         info!("Interface IPv6: {ipv6_addr}");
@@ -414,4 +402,110 @@ pub struct GetTUNResponse {
     pub enabled: bool,
     pub name: String,
     pub mtu: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Windows helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the embedded wintun.dll to %TEMP%\yggdrasil-rs\ and add that
+/// directory to the DLL search path so tun2 can find it without requiring
+/// the user to place wintun.dll next to the binary.
+///
+/// Compiled in only when `--features embedded-wintun` is active.
+#[cfg(all(feature = "embedded-wintun", target_os = "windows"))]
+fn ensure_wintun_dll() -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
+    use windows::core::PCWSTR;
+
+    // The DLL bytes are compiled in at build time.
+    // Place contrib/windows/wintun.dll before building with --features embedded-wintun.
+    static WINTUN_DLL: &[u8] = include_bytes!(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/contrib/windows/wintun.dll")
+    );
+
+    let dir = std::env::temp_dir().join("yggdrasil-rs");
+    std::fs::create_dir_all(&dir)?;
+    let dll_path = dir.join("wintun.dll");
+
+    // Only write if absent or size differs (avoids churn on repeated starts)
+    if !dll_path.exists()
+        || std::fs::metadata(&dll_path).map(|m| m.len()).unwrap_or(0)
+            != WINTUN_DLL.len() as u64
+    {
+        std::fs::write(&dll_path, WINTUN_DLL)?;
+    }
+
+    // Tell the DLL loader to search this directory before the standard paths
+    let dir_wide: Vec<u16> = dir.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe { SetDllDirectoryW(PCWSTR(dir_wide.as_ptr())) };
+
+    Ok(())
+}
+
+/// Assign an IPv6 unicast address to a named network interface using the
+/// Windows IP Helper API (`CreateUnicastIpAddressEntry`).
+///
+/// This replaces the `netsh interface ipv6 add address` subprocess approach
+/// with a direct kernel call — matching yggdrasil-go's winipcfg implementation.
+#[cfg(all(feature = "tun-support", target_os = "windows"))]
+fn windows_add_ipv6_address(
+    if_name: &str,
+    addr: Ipv6Addr,
+    prefix_len: u8,
+) -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ffi::OsStr;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        ConvertInterfaceAliasToLuid,
+        CreateUnicastIpAddressEntry,
+        InitializeUnicastIpAddressEntry,
+        MIB_UNICASTIPADDRESS_ROW,
+    };
+    use windows::Win32::Networking::WinSock::{
+        AF_INET6, IN6_ADDR, SOCKADDR_IN6,
+    };
+    use windows::core::PCWSTR;
+
+    // Convert interface alias (friendly name) to LUID
+    let name_wide: Vec<u16> = OsStr::new(if_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut luid = windows::Win32::NetworkManagement::IpHelper::NET_LUID_LH::default();
+    unsafe {
+        ConvertInterfaceAliasToLuid(PCWSTR(name_wide.as_ptr()), &mut luid)
+            .map_err(|e| anyhow::anyhow!("ConvertInterfaceAliasToLuid: {e}"))?;
+    }
+
+    // Build a MIB_UNICASTIPADDRESS_ROW and call CreateUnicastIpAddressEntry
+    let mut row = MIB_UNICASTIPADDRESS_ROW::default();
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+
+    row.InterfaceLuid = luid;
+    row.OnLinkPrefixLength = prefix_len;
+
+    // Set the IPv6 address
+    let octets = addr.octets();
+    unsafe {
+        row.Address.Ipv6 = SOCKADDR_IN6 {
+            sin6_family: AF_INET6.0 as u16,
+            sin6_addr: IN6_ADDR { u: windows::Win32::Networking::WinSock::IN6_ADDR_0 {
+                Byte: octets,
+            }},
+            ..Default::default()
+        };
+    }
+
+    unsafe {
+        CreateUnicastIpAddressEntry(&row)
+            .map_err(|e| anyhow::anyhow!("CreateUnicastIpAddressEntry: {e}"))?;
+    }
+
+    Ok(())
 }

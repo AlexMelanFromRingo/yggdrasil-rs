@@ -30,12 +30,20 @@ default = ["tun-support"]
 # Note: rtnetlink/netlink-sys are declared as Linux-only platform deps below — they
 # are NOT listed here so that `cargo build --target x86_64-pc-windows-*` works.
 tun-support = ["dep:tun2"]
+# embedded-wintun: embeds wintun.dll in the binary (Windows only).
+# Place contrib/windows/wintun.dll before building (download from https://wintun.net).
+# When enabled, the daemon extracts the DLL to %TEMP%\yggdrasil-rs\ at startup,
+# eliminating the need for users to place wintun.dll next to the executable.
+embedded-wintun = ["tun-support"]
 # mobile: enables C FFI layer for iOS (Swift/Objective-C) and Android (JNI/Kotlin).
 # Build with: cargo build --features mobile --target aarch64-apple-ios
 #              cargo ndk --target aarch64-linux-android build --features mobile
 mobile = []
 
 [dependencies]
+# Ironwood routing protocol (standalone crate)
+ironwood-rs = { git = "https://github.com/AlexMelanFromRingo/ironwood-rs" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -103,6 +111,16 @@ chrono = "0.4"
 # On Windows, tun2 uses the wintun driver: place wintun.dll next to the binary.
 # Download wintun.dll from https://wintun.net
 tun2 = { version = "3", optional = true, features = ["async"] }
+
+# Windows-only: WinAPI for IPv6 address assignment via IP Helper API
+# (replaces netsh subprocess, matches yggdrasil-go's winipcfg approach).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_LibraryLoader",
+] }
 
 # Linux-only: netlink for IPv6 address assignment after TUN creation.
 # Not optional — always present on Linux. The tun/mod.rs code is gated by
