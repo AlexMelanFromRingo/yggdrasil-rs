@@ -1,0 +1,97 @@
+[package]
+name = "yggdrasil-rs"
+version = "0.5.13"
+edition = "2024"
+authors = ["Yggdrasil Network Contributors"]
+description = "Yggdrasil network node — Rust port of yggdrasil-go"
+license = "LGPL-3.0"
+
+[[bin]]
+name = "yggdrasil"
+path = "src/bin/yggdrasil.rs"
+
+[[bin]]
+name = "yggdrasilctl"
+path = "src/bin/yggdrasilctl.rs"
+
+[[bin]]
+name = "genkeys"
+path = "src/bin/genkeys.rs"
+
+[features]
+default = ["tun-support"]
+tun-support = ["dep:tun2", "dep:rtnetlink", "dep:netlink-sys"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# TLS / crypto
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+rustls-pki-types = "1"
+rustls-pemfile = "2"
+
+# QUIC
+quinn = { version = "0.11", default-features = false, features = ["rustls", "ring"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core", "serde", "hazmat"] }
+x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
+chacha20poly1305 = "0.10"
+blake2 = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+curve25519-dalek = "4"
+crypto_box = { version = "0.9", features = ["salsa20"] }
+murmur3 = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = { version = "0.4", features = ["serde"] }
+pem = "3"
+pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
+rcgen = { version = "0.13", features = ["pem"] }
+
+# Config (HJSON support)
+deser-hjson = "2"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Networking utilities
+url = "2"
+socket2 = { version = "0.5", features = ["all"] }
+tokio-socks = "0.5"
+ip_network = "0.4"
+pnet_datalink = "0.35"
+libc = "0.2"
+
+# Utilities
+regex = "1"
+bytes = "1"
+parking_lot = "0.12"
+dashmap = "6"
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
+
+# TUN (Linux/macOS — via feature flag)
+tun2 = { version = "3", optional = true, features = ["async"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = { version = "0.14", optional = true }
+netlink-sys = { version = "0.8", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
