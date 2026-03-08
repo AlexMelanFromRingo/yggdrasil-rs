@@ -1904,6 +1904,16 @@ struct SessionBuffer {
     created:      Instant,
 }
 
+/// Result returned by decrypt_traffic — tells caller what action to take.
+enum DecryptResult {
+    /// Decryption succeeded; contains plaintext payload.
+    Ok(Vec<u8>),
+    /// Keys out of sync; caller should send a SessionInit to recover.
+    SendInit,
+    /// Packet is invalid/replayed; drop silently.
+    Drop,
+}
+
 struct SessionInfo {
     ed:             PublicKey, // remote ed25519 key
     seq:            u64,       // remote seq
@@ -1921,6 +1931,7 @@ struct SessionInfo {
     next_pub:       BoxPub,
     next_send_nonce: u64,
     next_recv_nonce: u64,
+    rotated:        Option<Instant>, // last time we did key rotation (rate-limit: once/min)
     last_used:      Instant,
     rx_bytes:       u64,
     tx_bytes:       u64,
@@ -1937,7 +1948,7 @@ impl SessionInfo {
             recv_priv, recv_pub, recv_nonce: 0,
             send_priv, send_pub, send_nonce: 0,
             next_priv, next_pub, next_send_nonce: 0, next_recv_nonce: 0,
-            last_used: Instant::now(), rx_bytes: 0, tx_bytes: 0,
+            rotated: None, last_used: Instant::now(), rx_bytes: 0, tx_bytes: 0,
         };
         s
     }
@@ -1974,6 +1985,10 @@ impl SessionInfo {
             self.next_pub  = np;
             self.next_priv = npr;
             self.local_key_seq += 1;
+            // Match Go: _fixShared(0, 0) resets all nonces
+            self.recv_nonce = 0;
+            self.next_send_nonce = 0;
+            self.next_recv_nonce = 0;
         }
 
         // Prepend nextPub inside encrypted payload
@@ -1994,64 +2009,116 @@ impl SessionInfo {
         out
     }
 
-    fn decrypt_traffic(&mut self, msg: &[u8]) -> Option<Vec<u8>> {
-        if msg.is_empty() || msg[0] != SESSION_TRAFFIC { return None; }
+    fn decrypt_traffic(&mut self, msg: &[u8]) -> DecryptResult {
+        if msg.is_empty() || msg[0] != SESSION_TRAFFIC { return DecryptResult::Drop; }
         let mut d = &msg[1..];
-        let remote_key_seq = chop_uvarint(&mut d)?;
-        let local_key_seq  = chop_uvarint(&mut d)?;
-        let nonce          = chop_uvarint(&mut d)?;
+        let remote_key_seq = match chop_uvarint(&mut d) { Some(v) => v, None => return DecryptResult::Drop };
+        let local_key_seq  = match chop_uvarint(&mut d) { Some(v) => v, None => return DecryptResult::Drop };
+        let nonce          = match chop_uvarint(&mut d) { Some(v) => v, None => return DecryptResult::Drop };
 
         let from_current = remote_key_seq == self.remote_key_seq;
         let from_next    = remote_key_seq == self.remote_key_seq + 1;
         let to_recv      = local_key_seq + 1 == self.local_key_seq;
         let to_send      = local_key_seq == self.local_key_seq;
 
-        // Select key for decryption
-        let (shared_pub, shared_priv, ok_nonce, next_nonce_field) =
-        if from_current && to_recv {
-            if nonce <= self.recv_nonce { return None; }
-            (self.current, self.recv_priv, true, 0u64)
+        // Select key for decryption (matches Go's doRecv switch)
+        enum Case { CurrentToRecv, NextToSend, NextToRecv }
+        let case = if from_current && to_recv {
+            if nonce <= self.recv_nonce { return DecryptResult::Drop; }
+            Case::CurrentToRecv
         } else if from_next && to_send {
-            if nonce <= self.next_send_nonce { return None; }
-            (self.next, self.send_priv, false, nonce)
+            if nonce <= self.next_send_nonce { return DecryptResult::Drop; }
+            Case::NextToSend
         } else if from_next && to_recv {
-            if nonce <= self.next_recv_nonce { return None; }
-            (self.next, self.recv_priv, false, nonce)
+            if nonce <= self.next_recv_nonce { return DecryptResult::Drop; }
+            Case::NextToRecv
         } else {
-            return None; // can't make sense of it
+            // Can't make sense of the key seqs — send init to recover (matches Go default case)
+            return DecryptResult::SendInit;
         };
 
-        let decrypted = box_open(d, nonce, &shared_pub, &shared_priv)?;
+        let (shared_pub, shared_priv) = match case {
+            Case::CurrentToRecv => (self.current, self.recv_priv),
+            Case::NextToSend    => (self.next,    self.send_priv),
+            Case::NextToRecv    => (self.next,    self.recv_priv),
+        };
 
-        if decrypted.len() < 32 { return None; }
-        let inner_key: BoxPub = decrypted[..32].try_into().ok()?;
+        let decrypted = match box_open(d, nonce, &shared_pub, &shared_priv) {
+            Some(d) => d,
+            // Decryption failure = keys out of sync → send init to recover (matches Go else branch)
+            None => return DecryptResult::SendInit,
+        };
+
+        if decrypted.len() < 32 { return DecryptResult::Drop; }
+        let inner_key: BoxPub = match decrypted[..32].try_into() {
+            Ok(k) => k,
+            Err(_) => return DecryptResult::Drop,
+        };
         let payload = decrypted[32..].to_vec();
 
-        // Update state based on which case we handled
-        if from_current && to_recv {
-            self.recv_nonce = nonce;
-        } else if from_next {
-            // Rotate keys (rate limited to once per minute)
-            self.current = self.next;
-            self.next = inner_key;
-            self.remote_key_seq += 1;
-            self.recv_pub  = self.send_pub;
-            self.recv_priv = self.send_priv;
-            self.send_pub  = self.next_pub;
-            self.send_priv = self.next_priv;
-            let (np, npr) = new_box_key_pair();
-            self.next_pub  = np;
-            self.next_priv = npr;
-            self.local_key_seq += 1;
-            self.recv_nonce = nonce;
-            self.send_nonce = 0;
-            self.next_send_nonce = 0;
-            self.next_recv_nonce = 0;
+        // Update nonces and potentially rotate keys (matches Go onSuccess callbacks)
+        match case {
+            Case::CurrentToRecv => {
+                self.recv_nonce = nonce;
+            }
+            Case::NextToSend => {
+                // Always update nonce to prevent replay even if rate-limited (matches Go)
+                self.next_send_nonce = nonce;
+                // Rate-limited key rotation: at most once per minute (matches Go rotated check)
+                let should_rotate = self.rotated
+                    .map(|t| t.elapsed() > Duration::from_secs(60))
+                    .unwrap_or(true);
+                if should_rotate {
+                    self.current = self.next;
+                    self.next = inner_key;
+                    self.remote_key_seq += 1;
+                    self.recv_pub  = self.send_pub;
+                    self.recv_priv = self.send_priv;
+                    self.send_pub  = self.next_pub;
+                    self.send_priv = self.next_priv;
+                    let (np, npr) = new_box_key_pair();
+                    self.next_pub  = np;
+                    self.next_priv = npr;
+                    self.local_key_seq += 1;
+                    // _fixShared(nonce, 0): recvNonce=nonce, sendNonce=0, next*=0
+                    self.recv_nonce = nonce;
+                    self.send_nonce = 0;
+                    self.next_send_nonce = 0;
+                    self.next_recv_nonce = 0;
+                    self.rotated = Some(Instant::now());
+                }
+            }
+            Case::NextToRecv => {
+                // Always update nonce to prevent replay even if rate-limited (matches Go)
+                self.next_recv_nonce = nonce;
+                let should_rotate = self.rotated
+                    .map(|t| t.elapsed() > Duration::from_secs(60))
+                    .unwrap_or(true);
+                if should_rotate {
+                    self.current = self.next;
+                    self.next = inner_key;
+                    self.remote_key_seq += 1;
+                    self.recv_pub  = self.send_pub;
+                    self.recv_priv = self.send_priv;
+                    self.send_pub  = self.next_pub;
+                    self.send_priv = self.next_priv;
+                    let (np, npr) = new_box_key_pair();
+                    self.next_pub  = np;
+                    self.next_priv = npr;
+                    self.local_key_seq += 1;
+                    // _fixShared(nonce, 0)
+                    self.recv_nonce = nonce;
+                    self.send_nonce = 0;
+                    self.next_send_nonce = 0;
+                    self.next_recv_nonce = 0;
+                    self.rotated = Some(Instant::now());
+                }
+            }
         }
 
         self.rx_bytes += payload.len() as u64;
         self.last_used = Instant::now();
-        Some(payload)
+        DecryptResult::Ok(payload)
     }
 }
 
@@ -2128,6 +2195,19 @@ impl SessionInitMsg {
 // Session manager
 // ============================================================================
 
+/// Action returned by handle_data, telling the caller what to do next.
+enum SessionAction {
+    /// Decrypted payload ready to deliver to the application.
+    Plaintext(Vec<u8>),
+    /// Keys out of sync on existing session — send init with session's own keys to recover.
+    RecoveryInit,
+    /// Traffic arrived for an unknown session — send throwaway init (random keys, no buffer).
+    /// Matches Go's _handleTraffic else branch.
+    ThrowawayInit,
+    /// Nothing to do (handshake packet processed, or replay/invalid).
+    Nothing,
+}
+
 struct SessionManager {
     sessions:   HashMap<PublicKey, SessionInfo>,
     buffers:    HashMap<PublicKey, SessionBuffer>,
@@ -2147,27 +2227,67 @@ impl SessionManager {
         }
     }
 
-    fn handle_data(&mut self, from_pub: &PublicKey, data: Vec<u8>) -> Option<Vec<u8>> {
-        if data.is_empty() { return None; }
+    fn handle_data(&mut self, from_pub: &PublicKey, data: Vec<u8>) -> SessionAction {
+        if data.is_empty() { return SessionAction::Nothing; }
         match data[0] {
-            SESSION_DUMMY => None,
+            SESSION_DUMMY => SessionAction::Nothing,
             SESSION_INIT => {
-                let init = SessionInitMsg::decrypt(&data, &self.ed_priv, from_pub)?;
-                self.handle_init(from_pub, &init);
-                // Return an ack to send back
-                None // ack is sent via router path (handled separately)
+                if let Some(init) = SessionInitMsg::decrypt(&data, &self.ed_priv, from_pub) {
+                    self.handle_init(from_pub, &init);
+                }
+                SessionAction::Nothing // ack sent separately
             }
             SESSION_ACK => {
-                let ack = SessionInitMsg::decrypt(&data, &self.ed_priv, from_pub)?;
-                self.handle_ack(from_pub, &ack);
-                None
+                if let Some(ack) = SessionInitMsg::decrypt(&data, &self.ed_priv, from_pub) {
+                    self.handle_ack(from_pub, &ack);
+                }
+                SessionAction::Nothing
             }
             SESSION_TRAFFIC => {
-                let session = self.sessions.get_mut(from_pub)?;
-                session.decrypt_traffic(&data)
+                if let Some(session) = self.sessions.get_mut(from_pub) {
+                    match session.decrypt_traffic(&data) {
+                        DecryptResult::Ok(payload) => SessionAction::Plaintext(payload),
+                        // Keys out of sync: recover by sending init with existing session keys
+                        DecryptResult::SendInit    => SessionAction::RecoveryInit,
+                        DecryptResult::Drop        => SessionAction::Nothing,
+                    }
+                } else {
+                    // Unknown session — could be spoofed/replay, don't create a buffer.
+                    // Send a throwaway init (matches Go _handleTraffic else branch).
+                    SessionAction::ThrowawayInit
+                }
             }
-            _ => None,
+            _ => SessionAction::Nothing,
         }
+    }
+
+    /// Build a SessionInit using the existing session's send_pub/next_pub.
+    /// Used to recover from key desync (matches Go sessionInfo._sendInit).
+    fn make_recovery_init(&self, pub_key: &PublicKey) -> Option<Vec<u8>> {
+        let session = self.sessions.get(pub_key)?;
+        let init = SessionInitMsg {
+            current: session.send_pub,
+            next:    session.next_pub,
+            key_seq: session.local_key_seq,
+            seq: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_secs(),
+        };
+        init.encrypt(&self.ed_priv, pub_key, SESSION_INIT)
+    }
+
+    /// Build a SessionInit with throwaway random keys (no buffer created).
+    /// Used when traffic arrives for an unknown session (matches Go _handleTraffic else branch).
+    fn make_throwaway_init(&self, pub_key: &PublicKey) -> Option<Vec<u8>> {
+        let (current, _) = new_box_key_pair();
+        let (next, _)    = new_box_key_pair();
+        let init = SessionInitMsg {
+            current, next, key_seq: 0,
+            seq: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_secs(),
+        };
+        init.encrypt(&self.ed_priv, pub_key, SESSION_INIT)
     }
 
     fn handle_init(&mut self, pub_key: &PublicKey, init: &SessionInitMsg) {
@@ -2655,7 +2775,7 @@ async fn peer_read_loop<R: AsyncRead + Unpin + Send + ?Sized>(
                     // If destined for us, pass to session layer
                     if dest == self_key {
                         let mut sessions = inner.sessions.lock().await;
-                        let plaintext = sessions.handle_data(&source, payload.clone());
+                        let action = sessions.handle_data(&source, payload.clone());
                         // Flush any data queued by handle_ack (buffered payload after session est.)
                         let pending = std::mem::take(&mut sessions.pending_tx);
                         // Check if we need to send an ack (session init received)
@@ -2669,13 +2789,23 @@ async fn peer_read_loop<R: AsyncRead + Unpin + Send + ?Sized>(
                                 drop(sessions);
                             }
                         } else {
+                            // Handle recovery/throwaway init for session desync
+                            let recovery_bytes = match &action {
+                                SessionAction::RecoveryInit  => sessions.make_recovery_init(&source),
+                                SessionAction::ThrowawayInit => sessions.make_throwaway_init(&source),
+                                _ => None,
+                            };
                             drop(sessions);
+                            if let Some(init_bytes) = recovery_bytes {
+                                tracing::debug!("session recovery: sending init to {}", hex::encode(&source[..8]));
+                                let _ = inner.ack_tx.try_send((source, init_bytes));
+                            }
                         }
                         // Route any pending (post-session-establishment) encrypted packets
                         for (dest_key, enc) in pending {
                             let _ = inner.ack_tx.try_send((dest_key, enc));
                         }
-                        if let Some(plaintext) = plaintext {
+                        if let SessionAction::Plaintext(plaintext) = action {
                             // Deliver decrypted payload to application
                             let _ = inner.router.lock().await.app_tx.try_send(InboundPacket {
                                 payload: plaintext,
