@@ -6,6 +6,12 @@ authors = ["Yggdrasil Network Contributors"]
 description = "Yggdrasil network node — Rust port of yggdrasil-go"
 license = "LGPL-3.0"
 
+# cdylib + staticlib allow the library to be used as a C-compatible shared/static
+# library from Swift (iOS) and Kotlin/JNI (Android) via the `mobile` feature.
+[lib]
+name = "yggdrasil_rs"
+crate-type = ["lib", "cdylib", "staticlib"]
+
 [[bin]]
 name = "yggdrasil"
 path = "src/bin/yggdrasil.rs"
@@ -20,7 +26,14 @@ path = "src/bin/genkeys.rs"
 
 [features]
 default = ["tun-support"]
-tun-support = ["dep:tun2", "dep:rtnetlink", "dep:netlink-sys"]
+# tun-support: enables TUN device (Linux via rtnetlink, macOS/Windows via OS APIs)
+# Note: rtnetlink/netlink-sys are declared as Linux-only platform deps below — they
+# are NOT listed here so that `cargo build --target x86_64-pc-windows-*` works.
+tun-support = ["dep:tun2"]
+# mobile: enables C FFI layer for iOS (Swift/Objective-C) and Android (JNI/Kotlin).
+# Build with: cargo build --features mobile --target aarch64-apple-ios
+#              cargo ndk --target aarch64-linux-android build --features mobile
+mobile = []
 
 [dependencies]
 # Async runtime
@@ -86,12 +99,19 @@ dashmap = "6"
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
 
-# TUN (Linux/macOS — via feature flag)
+# TUN — cross-platform (Linux/macOS/Windows).
+# On Windows, tun2 uses the wintun driver: place wintun.dll next to the binary.
+# Download wintun.dll from https://wintun.net
 tun2 = { version = "3", optional = true, features = ["async"] }
 
+# Linux-only: netlink for IPv6 address assignment after TUN creation.
+# Not optional — always present on Linux. The tun/mod.rs code is gated by
+# #[cfg(all(feature = "tun-support", target_os = "linux"))] so they're only
+# used when the tun-support feature is enabled. Cross-compiling to Windows/iOS/
+# Android is safe because these deps are simply absent on those platforms.
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = { version = "0.14", optional = true }
-netlink-sys = { version = "0.8", optional = true }
+rtnetlink = "0.14"
+netlink-sys = "0.8"
 
 [dev-dependencies]
 tokio-test = "0.4"

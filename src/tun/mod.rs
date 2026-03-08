@@ -117,10 +117,18 @@ impl TunAdapter {
         let actual_mtu = supported_mtu(self.rwc.max_mtu().min(desired_mtu));
         self.rwc.set_mtu(actual_mtu);
 
-        #[cfg(feature = "tun-support")]
+        #[cfg(any(
+            all(feature = "tun-support", target_os = "linux"),
+            all(feature = "tun-support", target_os = "macos"),
+            all(feature = "tun-support", target_os = "windows"),
+        ))]
         self.setup_tun(if_name, actual_mtu).await?;
 
-        #[cfg(not(feature = "tun-support"))]
+        #[cfg(not(any(
+            all(feature = "tun-support", target_os = "linux"),
+            all(feature = "tun-support", target_os = "macos"),
+            all(feature = "tun-support", target_os = "windows"),
+        )))]
         {
             warn!("TUN support not compiled in (missing 'tun-support' feature)");
             return Err(anyhow!("TUN not supported on this build"));
@@ -136,63 +144,12 @@ impl TunAdapter {
         Ok(())
     }
 
+    /// Shared TUN read/write task spawner — used by all platforms after device creation.
     #[cfg(feature = "tun-support")]
-    async fn setup_tun(self: &Arc<Self>, if_name: String, mtu: u64) -> Result<()> {
-        use futures::TryStreamExt;
-        use std::net::IpAddr;
-
-        let actual_name = if if_name == "auto" { "ygg0".to_string() } else { if_name };
-        let ipv6_addr = Ipv6Addr::from(self.addr.0);
-
-        // Create TUN device without setting address (tun2 only supports IPv4 address
-        // assignment via SIOCSIFADDR; IPv6 must be set separately via rtnetlink).
-        let mut config = tun2::Configuration::default();
-        config.name(actual_name.clone());
-        config.mtu(mtu.min(65535) as u16);
-        // Do NOT call config.address() with an IPv6 address — that causes EINVAL.
-        // config.up() also sets flags via SIOCSIFFLAGS; we use rtnetlink .up() instead.
-
-        let device = tun2::create_as_async(&config)
-            .map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
-
-        // Now assign the IPv6 address and bring the interface up via rtnetlink.
-        {
-            let (conn, handle, _) = rtnetlink::new_connection()
-                .map_err(|e| anyhow!("rtnetlink connect failed: {e}"))?;
-            tokio::spawn(conn);
-
-            // Find the link index by interface name.
-            let mut links = handle.link().get().match_name(actual_name.clone()).execute();
-            let link = links.try_next().await
-                .map_err(|e| anyhow!("rtnetlink get link failed: {e}"))?
-                .ok_or_else(|| anyhow!("interface {actual_name} not found after creation"))?;
-            let link_index = link.header.index;
-
-            // Add yggdrasil IPv6 address with /7 prefix (200::/7 network).
-            handle.address()
-                .add(link_index, IpAddr::V6(ipv6_addr), 7)
-                .execute()
-                .await
-                .map_err(|e| anyhow!("failed to add IPv6 address: {e}"))?;
-
-            // Bring the interface up.
-            handle.link()
-                .set(link_index)
-                .up()
-                .execute()
-                .await
-                .map_err(|e| anyhow!("failed to bring {actual_name} up: {e}"))?;
-        }
-
-        info!("Interface name: {actual_name}");
-        info!("Interface IPv6: {ipv6_addr}");
-        info!("Interface MTU: {mtu}");
-
-        // Wrap in Arc so both read and write tasks can share it concurrently.
-        // tun2::AsyncDevice::recv/send take &self, making Arc sharing safe.
+    async fn spawn_tun_io_tasks(self: &Arc<Self>, device: tun2::AsyncDevice) {
         let dev = Arc::new(device);
 
-        // TUN read task: reads packets from the TUN device, sends to overlay
+        // TUN read task: OS → overlay
         let dev_r = Arc::clone(&dev);
         let rwc_r = Arc::clone(&self.rwc);
         let is_open_r = Arc::clone(self);
@@ -216,7 +173,7 @@ impl TunAdapter {
             }
         });
 
-        // TUN write task: receives packets from overlay queue, writes to TUN device
+        // TUN write task: overlay → OS
         let dev_w = Arc::clone(&dev);
         let this_w = Arc::clone(self);
         let h_write = tokio::spawn(async move {
@@ -242,7 +199,160 @@ impl TunAdapter {
         let mut tasks = self.tasks.lock().await;
         tasks.push(h_read);
         tasks.push(h_write);
+    }
+
+    /// Linux TUN setup: create device, assign IPv6 via rtnetlink, bring link up.
+    #[cfg(all(feature = "tun-support", target_os = "linux"))]
+    async fn setup_tun(self: &Arc<Self>, if_name: String, mtu: u64) -> Result<()> {
+        use futures::TryStreamExt;
+        use std::net::IpAddr;
+
+        let actual_name = if if_name == "auto" { "ygg0".to_string() } else { if_name };
+        let ipv6_addr = Ipv6Addr::from(self.addr.0);
+
+        // Create TUN device. Do NOT call config.address() with IPv6 — EINVAL.
+        // IPv6 address is assigned separately via rtnetlink below.
+        let mut config = tun2::Configuration::default();
+        config.name(actual_name.clone());
+        config.mtu(mtu.min(65535) as u16);
+
+        let device = tun2::create_as_async(&config)
+            .map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
+
+        // Assign IPv6 address and bring interface up via rtnetlink.
+        {
+            let (conn, handle, _) = rtnetlink::new_connection()
+                .map_err(|e| anyhow!("rtnetlink connect failed: {e}"))?;
+            tokio::spawn(conn);
+
+            let mut links = handle.link().get().match_name(actual_name.clone()).execute();
+            let link = links.try_next().await
+                .map_err(|e| anyhow!("rtnetlink get link: {e}"))?
+                .ok_or_else(|| anyhow!("interface {actual_name} not found"))?;
+            let link_index = link.header.index;
+
+            handle.address()
+                .add(link_index, IpAddr::V6(ipv6_addr), 7)
+                .execute()
+                .await
+                .map_err(|e| anyhow!("add IPv6 address: {e}"))?;
+
+            handle.link().set(link_index).up().execute().await
+                .map_err(|e| anyhow!("bring {actual_name} up: {e}"))?;
+        }
+
+        info!("Interface name: {actual_name}");
+        info!("Interface IPv6: {ipv6_addr}");
+        info!("Interface MTU: {mtu}");
+
+        self.spawn_tun_io_tasks(device).await;
         Ok(())
+    }
+
+    /// macOS TUN setup: create utun device, assign IPv6 via ifconfig.
+    #[cfg(all(feature = "tun-support", target_os = "macos"))]
+    async fn setup_tun(self: &Arc<Self>, if_name: String, mtu: u64) -> Result<()> {
+        let actual_name = if if_name == "auto" { "utun9".to_string() } else { if_name };
+        let ipv6_addr = Ipv6Addr::from(self.addr.0);
+
+        let mut config = tun2::Configuration::default();
+        config.name(actual_name.clone());
+        config.mtu(mtu.min(65535) as u16);
+
+        let device = tun2::create_as_async(&config)
+            .map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
+
+        // macOS: assign IPv6 address via ifconfig
+        let addr_str = format!("{ipv6_addr}");
+        let status = std::process::Command::new("ifconfig")
+            .args([&actual_name, "inet6", &addr_str, "prefixlen", "7", "alias"])
+            .status()
+            .map_err(|e| anyhow!("ifconfig failed: {e}"))?;
+        if !status.success() {
+            return Err(anyhow!("ifconfig inet6 failed for {actual_name}"));
+        }
+
+        // Set MTU
+        let _ = std::process::Command::new("ifconfig")
+            .args([&actual_name, "mtu", &mtu.to_string()])
+            .status();
+
+        // Bring up
+        let _ = std::process::Command::new("ifconfig")
+            .args([&actual_name, "up"])
+            .status();
+
+        info!("Interface name: {actual_name}");
+        info!("Interface IPv6: {ipv6_addr}");
+        info!("Interface MTU: {mtu}");
+
+        self.spawn_tun_io_tasks(device).await;
+        Ok(())
+    }
+
+    /// Windows TUN setup via wintun driver.
+    ///
+    /// **Requirement**: `wintun.dll` must be placed in the same directory as the
+    /// binary. Download from <https://wintun.net>.
+    ///
+    /// The process must be run as Administrator (or have SeNetworkAdminPrivilege).
+    /// IPv6 address is configured via `netsh interface ipv6`.
+    #[cfg(all(feature = "tun-support", target_os = "windows"))]
+    async fn setup_tun(self: &Arc<Self>, if_name: String, mtu: u64) -> Result<()> {
+        let actual_name = if if_name == "auto" { "Yggdrasil".to_string() } else { if_name };
+        let ipv6_addr = Ipv6Addr::from(self.addr.0);
+
+        // tun2 on Windows uses the wintun driver automatically.
+        let mut config = tun2::Configuration::default();
+        config.name(actual_name.clone());
+        config.mtu(mtu.min(65535) as u16);
+
+        let device = tun2::create_as_async(&config)
+            .map_err(|e| anyhow!("failed to create TUN device (is wintun.dll present?): {e}"))?;
+
+        // Assign IPv6 address via netsh
+        let addr_str = format!("{ipv6_addr}");
+        let output = std::process::Command::new("netsh")
+            .args([
+                "interface", "ipv6", "add", "address",
+                &actual_name,
+                &format!("{addr_str}/7"),
+            ])
+            .output()
+            .map_err(|e| anyhow!("netsh failed: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("netsh add address failed: {stderr}"));
+        }
+
+        // Set MTU via netsh
+        let _ = std::process::Command::new("netsh")
+            .args([
+                "interface", "ipv6", "set", "subinterface",
+                &actual_name,
+                &format!("mtu={mtu}"),
+                "store=active",
+            ])
+            .output();
+
+        info!("Interface name: {actual_name}");
+        info!("Interface IPv6: {ipv6_addr}");
+        info!("Interface MTU: {mtu}");
+
+        self.spawn_tun_io_tasks(device).await;
+        Ok(())
+    }
+
+    /// Fallback for unsupported platforms (e.g. FreeBSD without explicit support).
+    #[cfg(all(
+        feature = "tun-support",
+        not(target_os = "linux"),
+        not(target_os = "macos"),
+        not(target_os = "windows"),
+    ))]
+    async fn setup_tun(self: &Arc<Self>, if_name: String, mtu: u64) -> Result<()> {
+        Err(anyhow!("TUN setup is not implemented for this platform. Contributions welcome!"))
     }
 
     /// Spawns a task that reads IPv6 packets from the overlay and queues them

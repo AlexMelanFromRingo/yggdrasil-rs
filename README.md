@@ -26,8 +26,8 @@ Key properties:
 - [x] Spanning tree routing with greedy path selection
 - [x] Source routing via PathLookup/PathNotify/PathBroken
 - [x] Bloom filter multicast for path discovery
-- [x] Session encryption with double-ratchet key rotation
-- [x] TUN interface (Linux/macOS)
+- [x] Session encryption with double-ratchet key rotation + recovery
+- [x] TUN interface — **Linux** (rtnetlink), **macOS** (ifconfig), **Windows** (wintun/netsh)
 - [x] TCP, TLS, UNIX socket peer connections
 - [x] SOCKS5 proxy support for outbound peers
 - [x] Multicast peer discovery (UDP `ff02::114:9001`)
@@ -36,6 +36,7 @@ Key properties:
 - [x] `yggdrasilctl` admin CLI
 - [x] `genkeys` vanity key generator
 - [x] Intermediate mesh routing (forwards traffic for other nodes)
+- [x] **iOS / Android library mode** via C FFI (`--features mobile`)
 
 ---
 
@@ -51,7 +52,19 @@ Key properties:
 ```bash
 git clone https://github.com/AlexMelanFromRingo/yggdrasil-rs
 cd yggdrasil-rs
+
+# Linux / macOS
 cargo build --release --bin yggdrasil --features tun-support
+
+# Windows (requires wintun.dll next to the binary — download from https://wintun.net)
+cargo build --release --bin yggdrasil --features tun-support --target x86_64-pc-windows-gnu
+
+# Android shared library (requires cargo-ndk and Android NDK)
+cargo ndk --target aarch64-linux-android --platform 21 \
+    -- build --release --features mobile
+
+# iOS static library
+cargo build --release --features mobile --target aarch64-apple-ios
 ```
 
 ### Generate a config
@@ -211,8 +224,24 @@ The admin socket accepts newline-delimited JSON:
 | Per-peer I/O | goroutine per peer | tokio task per peer + mpsc channel |
 | QUIC | ✓ (quic-go) | ✓ (quinn) |
 | WebSocket | ✓ | ✓ (tokio-tungstenite) |
-| Windows | ✓ | untested |
-| iOS/Android | ✓ (via library) | not yet |
+| Linux TUN | ✓ (rtnetlink) | ✓ (rtnetlink) |
+| macOS TUN | ✓ (utun) | ✓ (ifconfig) |
+| Windows TUN | ✓ (wintun) | ✓ (wintun + netsh) |
+| iOS/Android lib | ✓ (Go mobile) | ✓ (`--features mobile`, C FFI) |
+
+### Windows notes
+
+- Requires `wintun.dll` in the same directory as the binary (download from [wintun.net](https://wintun.net))
+- Run as Administrator (or grant `SeNetworkAdminPrivilege`)
+- Admin socket uses TCP (`tcp://localhost:9001`) instead of UNIX socket
+
+### iOS / Android notes
+
+Enable the `mobile` feature. This compiles the library without a TUN adapter.
+Instead, the app feeds raw IPv6 packets via `ygg_write()` and reads decrypted
+packets via `ygg_read()`, bridging the OS VPN interface to the overlay.
+
+See `src/mobile/mod.rs` for the full C header, Swift example, and Kotlin/JNI example.
 
 Wire format is 100% identical — a yggdrasil-rs node interoperates transparently with yggdrasil-go nodes.
 

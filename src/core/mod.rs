@@ -364,6 +364,27 @@ impl Core {
             .await;
     }
 
+    /// Returns a reference to the node's config (for mobile FFI and other consumers).
+    pub fn config_ref(&self) -> &NodeConfig {
+        &self.config
+    }
+
+    /// Inject a raw IPv6 packet from an external source (e.g. mobile VPN interface).
+    ///
+    /// The destination ed25519 key is derived from the IPv6 destination address
+    /// using the yggdrasil address reverse-mapping (`Address::get_key`).
+    /// Packets destined outside `200::/7` are silently dropped.
+    pub async fn write_packet(&self, raw_ipv6: &[u8]) -> Result<()> {
+        if raw_ipv6.len() < 40 { return Ok(()); }
+        let dst_ip: [u8; 16] = raw_ipv6[24..40].try_into()
+            .map_err(|_| anyhow!("bad packet"))?;
+        let addr = crate::address::Address(dst_ip);
+        if !addr.is_valid() { return Ok(()); } // not a yggdrasil address
+        let key = addr.get_key();
+        self.write_to(raw_ipv6, &key).await?;
+        Ok(())
+    }
+
     /// Shuts down the node.
     pub async fn stop(&self) {
         info!("Stopping...");
