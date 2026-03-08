@@ -29,6 +29,9 @@ use url::Url;
 /// The Yggdrasil node — manages the full lifecycle.
 pub struct Core {
     packet_conn: Arc<PacketConn>,
+    /// Shared link manager — all peers and listeners share this registry so
+    /// that `retry_peers_now()` can signal all outbound links.
+    links: Arc<link::Links>,
     proto: Arc<ProtoHandler>,
     signing_key: SigningKey,
     public_key: [u8; 32],
@@ -71,8 +74,15 @@ impl Core {
 
         let (traffic_tx, traffic_rx) = mpsc::channel::<InboundPacket>(4096);
 
+        // Shared link manager — one instance for the lifetime of the node
+        let links = link::Links::new(
+            Arc::clone(&packet_conn),
+            Arc::clone(&node_config),
+        );
+
         let core = Arc::new(Core {
             packet_conn: Arc::clone(&packet_conn),
+            links,
             proto: Arc::clone(&proto),
             signing_key: signing_key.clone(),
             public_key,
@@ -289,39 +299,36 @@ impl Core {
     }
 
     /// Adds a persistent outbound peer.
-    pub async fn add_peer(self: &Arc<Self>, uri: &str, sintf: &str) -> Result<()> {
-        let links = link::Links::new(
-            Arc::clone(&self.packet_conn),
-            Arc::clone(&self.config),
-        );
-        links.add(uri, sintf, link::LinkType::Persistent).await
+    pub async fn add_peer(&self, uri: &str, sintf: &str) -> Result<()> {
+        self.links.add(uri, sintf, link::LinkType::Persistent).await
     }
 
     /// Adds an ephemeral (one-shot) outbound peer.
-    pub async fn call_peer(self: &Arc<Self>, uri: &str, sintf: &str) -> Result<()> {
-        let links = link::Links::new(
-            Arc::clone(&self.packet_conn),
-            Arc::clone(&self.config),
-        );
-        links.add(uri, sintf, link::LinkType::Ephemeral).await
+    pub async fn call_peer(&self, uri: &str, sintf: &str) -> Result<()> {
+        self.links.add(uri, sintf, link::LinkType::Ephemeral).await
+    }
+
+    /// Removes a persistent outbound peer.
+    pub async fn remove_peer(&self, uri: &str) -> Result<()> {
+        self.links.remove(uri).await
     }
 
     /// Starts a listener.
-    pub async fn listen(self: &Arc<Self>, uri: &str, sintf: &str) -> Result<link::Listener> {
-        let links = link::Links::new(
-            Arc::clone(&self.packet_conn),
-            Arc::clone(&self.config),
-        );
-        links.listen(uri, sintf, false).await
+    pub async fn listen(&self, uri: &str, sintf: &str) -> Result<link::Listener> {
+        self.links.listen(uri, sintf, false).await
     }
 
     /// Starts a local (multicast) listener that bypasses AllowedPublicKeys.
-    pub async fn listen_local(self: &Arc<Self>, uri: &str, sintf: &str) -> Result<link::Listener> {
-        let links = link::Links::new(
-            Arc::clone(&self.packet_conn),
-            Arc::clone(&self.config),
-        );
-        links.listen(uri, sintf, true).await
+    pub async fn listen_local(&self, uri: &str, sintf: &str) -> Result<link::Listener> {
+        self.links.listen(uri, sintf, true).await
+    }
+
+    /// Immediately retry all persistent outbound peers, skipping backoff.
+    ///
+    /// Port of `Core.RetryPeersNow()` in yggdrasil-go: sends a kick signal
+    /// to every outbound link's reconnect loop.
+    pub async fn retry_peers_now(&self) {
+        self.links.kick_all().await;
     }
 
     /// Sends a packet to the given destination public key.

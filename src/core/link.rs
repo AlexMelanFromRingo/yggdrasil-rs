@@ -7,7 +7,9 @@ use crate::core::handshake::VersionMetadata;
 use ironwood_rs::{BoxReader, BoxWriter, PacketConn, PublicKeyBytes};
 use crate::config::NodeConfig;
 use anyhow::{anyhow, Result};
+use futures::{SinkExt, StreamExt};
 use hex;
+use quinn::crypto::rustls::QuicClientConfig;
 use rustls_pki_types::ServerName;
 use std::{
     collections::HashMap,
@@ -22,6 +24,15 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_tungstenite::{
+    accept_hdr_async_with_config,
+    client_async_with_config,
+    tungstenite::{
+        handshake::server::{Request as WsRequest, Response as WsResponse, ErrorResponse},
+        protocol::Message,
+    },
+    WebSocketStream,
+};
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -237,6 +248,11 @@ impl Links {
             "tcp" => self.listen_tcp(&u, sintf, &options, local).await,
             "tls" => self.listen_tls(&u, sintf, &options, local).await,
             "unix" => self.listen_unix(&u, &options, local).await,
+            "quic" => self.listen_quic(&u, sintf, &options, local).await,
+            "ws" => self.listen_ws(&u, &options, local).await,
+            "wss" => Err(anyhow!(
+                "WSS listener not supported — use a WS listener behind a TLS reverse proxy"
+            )),
             s => Err(anyhow!("unknown link scheme: {s}")),
         }
     }
@@ -443,6 +459,12 @@ impl Links {
                 let (r, w) = tokio::io::split(tls);
                 Ok((Box::new(r), Box::new(w)))
             }
+            "quic" => {
+                let (send, recv) = self.dial_quic(u).await?;
+                Ok((Box::new(recv), Box::new(send)))
+            }
+            "ws" => self.dial_ws(u).await,
+            "wss" => self.dial_wss(u, options).await,
             "unix" => Err(anyhow!("unix dial not supported for outbound")),
             s => Err(anyhow!("unknown scheme: {s}")),
         }
@@ -462,6 +484,266 @@ impl Links {
         let stream = connector.connect(sni, tcp).await
             .map_err(|e| anyhow!("TLS handshake error: {e}"))?;
         Ok(stream)
+    }
+
+    // -----------------------------------------------------------------------
+    // QUIC dial + listen (port of link_quic.go)
+    // -----------------------------------------------------------------------
+
+    async fn dial_quic(
+        &self,
+        u: &Url,
+    ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+        let addr = resolve_host_port(u)?;
+        let hostname = u.host_str().unwrap_or("yggdrasil").to_string();
+
+        let tls_config = self.node_config.build_rustls_client_config()
+            .map_err(|e| anyhow!("QUIC TLS config: {e}"))?;
+
+        let quic_client = QuicClientConfig::try_from((*tls_config).clone())
+            .map_err(|e| anyhow!("QUIC client config: {e}"))?;
+
+        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client));
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_idle_timeout(Some(Duration::from_secs(60).try_into()
+            .map_err(|e| anyhow!("QUIC idle timeout: {e}"))?));
+        transport.keep_alive_interval(Some(Duration::from_secs(20)));
+        client_config.transport_config(Arc::new(transport));
+
+        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
+            .map_err(|e| anyhow!("QUIC endpoint: {e}"))?;
+        endpoint.set_default_client_config(client_config);
+
+        let sni = ServerName::try_from(hostname.clone())
+            .ok()
+            .and_then(|n| if let ServerName::DnsName(d) = n { Some(d.as_ref().to_string()) } else { None })
+            .unwrap_or_else(|| "yggdrasil".to_string());
+
+        let conn = endpoint.connect(addr, &sni)
+            .map_err(|e| anyhow!("QUIC connect {addr}: {e}"))?
+            .await
+            .map_err(|e| anyhow!("QUIC handshake {addr}: {e}"))?;
+
+        let (send, recv) = conn.open_bi().await
+            .map_err(|e| anyhow!("QUIC open_bi: {e}"))?;
+
+        Ok((send, recv))
+    }
+
+    async fn listen_quic(
+        self: &Arc<Self>,
+        u: &Url,
+        _sintf: &str,
+        options: &LinkOptions,
+        local: bool,
+    ) -> Result<Listener> {
+        let addr = resolve_host_port(u)?;
+
+        let tls_config = self.node_config.build_rustls_config()
+            .map_err(|e| anyhow!("QUIC TLS server config: {e}"))?;
+
+        let quic_server = quinn::crypto::rustls::QuicServerConfig::try_from((*tls_config).clone())
+            .map_err(|e| anyhow!("QUIC server config: {e}"))?;
+
+        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_idle_timeout(Some(Duration::from_secs(60).try_into()
+            .map_err(|e| anyhow!("QUIC idle timeout: {e}"))?));
+        transport.keep_alive_interval(Some(Duration::from_secs(20)));
+        server_config.transport_config(Arc::new(transport));
+
+        let endpoint = quinn::Endpoint::server(server_config, addr)
+            .map_err(|e| anyhow!("QUIC bind {addr}: {e}"))?;
+        let local_addr = endpoint.local_addr()
+            .unwrap_or(addr);
+        info!("QUIC listener started on {local_addr}");
+
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        let this = Arc::clone(self);
+        let opts = options.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    incoming = endpoint.accept() => {
+                        match incoming {
+                            Some(incoming) => {
+                                let this2 = Arc::clone(&this);
+                                let opts2 = opts.clone();
+                                tokio::spawn(async move {
+                                    match incoming.await {
+                                        Ok(conn) => {
+                                            match conn.accept_bi().await {
+                                                Ok((send, recv)) => {
+                                                    if let Err(e) = this2
+                                                        .handle_stream(LinkType::Incoming, &opts2, Box::new(recv), Box::new(send), local)
+                                                        .await
+                                                    {
+                                                        debug!("QUIC inbound handler error: {e}");
+                                                    }
+                                                }
+                                                Err(e) => debug!("QUIC accept_bi: {e}"),
+                                            }
+                                        }
+                                        Err(e) => debug!("QUIC connection error: {e}"),
+                                    }
+                                });
+                            }
+                            None => break,
+                        }
+                    }
+                    _ = &mut cancel_rx => break,
+                }
+            }
+            info!("QUIC listener stopped on {local_addr}");
+        });
+
+        Ok(Listener { local_addr, cancel: cancel_tx })
+    }
+
+    // -----------------------------------------------------------------------
+    // WebSocket dial (port of link_ws.go dial)
+    // -----------------------------------------------------------------------
+
+    async fn dial_ws(&self, u: &Url) -> Result<(BoxReader, BoxWriter)> {
+        let host_str = u.host_str().unwrap_or("127.0.0.1");
+        let port = u.port().unwrap_or(80);
+        let host_port = format!("{host_str}:{port}");
+        let ws_url = u.to_string();
+
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(ws_url.as_str())
+            .header("Host", host_str)
+            .header("Sec-WebSocket-Protocol", "ygg-ws")
+            .body(())
+            .map_err(|e| anyhow!("WS request build: {e}"))?;
+
+        let tcp = TcpStream::connect(&host_port).await
+            .map_err(|e| anyhow!("WS TCP connect {host_port}: {e}"))?;
+
+        let (ws, _resp) = client_async_with_config(request, tcp, None).await
+            .map_err(|e| anyhow!("WS handshake {host_port}: {e}"))?;
+
+        Ok(ws_bridge(ws))
+    }
+
+    /// Dial a WSS peer: TLS + WebSocket (port of link_wss.go dial).
+    async fn dial_wss(&self, u: &Url, options: &LinkOptions) -> Result<(BoxReader, BoxWriter)> {
+        let host_str = u.host_str().unwrap_or("127.0.0.1");
+        let port = u.port().unwrap_or(443);
+        let host_port = format!("{host_str}:{port}");
+
+        let tcp = TcpStream::connect(&host_port).await
+            .map_err(|e| anyhow!("WSS TCP connect {host_port}: {e}"))?;
+        let tls = self.upgrade_tls_client(tcp, options).await?;
+
+        // Build WS handshake request (tungstenite expects the wss:// URI)
+        let ws_url = u.to_string();
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(ws_url.as_str())
+            .header("Host", host_str)
+            .header("Sec-WebSocket-Protocol", "ygg-ws")
+            .body(())
+            .map_err(|e| anyhow!("WSS request build: {e}"))?;
+
+        let (ws, _resp) = client_async_with_config(request, tls, None).await
+            .map_err(|e| anyhow!("WSS handshake {host_port}: {e}"))?;
+
+        Ok(ws_bridge(ws))
+    }
+
+    // -----------------------------------------------------------------------
+    // WebSocket listen (port of link_ws.go listen)
+    // -----------------------------------------------------------------------
+
+    async fn listen_ws(
+        self: &Arc<Self>,
+        u: &Url,
+        options: &LinkOptions,
+        local: bool,
+    ) -> Result<Listener> {
+        let addr = resolve_host_port(u)?;
+        let tcp_listener = TcpListener::bind(addr).await
+            .map_err(|e| anyhow!("WS bind {addr}: {e}"))?;
+        let local_addr = tcp_listener.local_addr()?;
+        info!("WS listener started on {local_addr}");
+
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        let this = Arc::clone(self);
+        let opts = options.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    accept = tcp_listener.accept() => {
+                        match accept {
+                            Ok((tcp, remote)) => {
+                                debug!("WS inbound from {remote}");
+                                let this2 = Arc::clone(&this);
+                                let opts2 = opts.clone();
+                                tokio::spawn(async move {
+                                    let ws = match accept_hdr_async_with_config(
+                                        tcp,
+                                        |req: &WsRequest, mut resp: WsResponse|
+                                            -> std::result::Result<WsResponse, ErrorResponse>
+                                        {
+                                            let protos = req.headers()
+                                                .get("Sec-WebSocket-Protocol")
+                                                .and_then(|v| v.to_str().ok())
+                                                .unwrap_or("");
+                                            if protos.split(',').any(|p| p.trim() == "ygg-ws") {
+                                                resp.headers_mut().insert(
+                                                    "Sec-WebSocket-Protocol",
+                                                    "ygg-ws".parse().unwrap(),
+                                                );
+                                            }
+                                            Ok(resp)
+                                        },
+                                        None,
+                                    ).await {
+                                        Ok(ws) => ws,
+                                        Err(e) => {
+                                            debug!("WS upgrade error: {e}");
+                                            return;
+                                        }
+                                    };
+                                    let (r, w) = ws_bridge(ws);
+                                    if let Err(e) = this2.handle_stream(
+                                        LinkType::Incoming, &opts2, r, w, local,
+                                    ).await {
+                                        debug!("WS inbound handler error: {e}");
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                warn!("WS accept error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    _ = &mut cancel_rx => break,
+                }
+            }
+            info!("WS listener stopped on {local_addr}");
+        });
+
+        Ok(Listener { local_addr, cancel: cancel_tx })
+    }
+
+    // -----------------------------------------------------------------------
+    // RetryPeersNow support
+    // -----------------------------------------------------------------------
+
+    /// Send an immediate-reconnect signal to all persistent links.
+    ///
+    /// Port of `Core.RetryPeersNow()` in yggdrasil-go: sends to the `kick`
+    /// channel of every outbound link, causing them to skip the backoff sleep
+    /// and attempt reconnection immediately.
+    pub async fn kick_all(&self) {
+        let links = self.links.read().await;
+        for state in links.values() {
+            let _ = state.kick_tx.try_send(());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -627,6 +909,69 @@ fn strip_query(uri: &str) -> String {
     } else {
         uri.to_string()
     }
+}
+
+/// Bridge a `WebSocketStream<S>` into `(BoxReader, BoxWriter)`.
+///
+/// Spawns a background task that relays data between WebSocket binary
+/// messages and an in-process byte pipe, mirroring the behaviour of
+/// `websocket.NetConn()` in yggdrasil-go.
+fn ws_bridge<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    ws: WebSocketStream<S>,
+) -> (BoxReader, BoxWriter) {
+    let (app_side, bridge_side) = tokio::io::duplex(1 << 16);
+    let (app_r, app_w) = tokio::io::split(app_side);
+    let (mut bridge_r, mut bridge_w) = tokio::io::split(bridge_side);
+
+    tokio::spawn(async move {
+        let (mut ws_tx, mut ws_rx) = ws.split();
+
+        let ws_to_bridge = async {
+            loop {
+                match ws_rx.next().await {
+                    Some(Ok(Message::Binary(data))) => {
+                        if bridge_w.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(t))) => {
+                        if bridge_w.write_all(t.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Ping(_)))
+                    | Some(Ok(Message::Pong(_)))
+                    | Some(Ok(Message::Frame(_))) => {}
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                }
+            }
+        };
+
+        let bridge_to_ws = async {
+            let mut buf = vec![0u8; 65536];
+            loop {
+                match bridge_r.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if ws_tx
+                            .send(Message::Binary(buf[..n].to_vec().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        tokio::select! {
+            _ = ws_to_bridge => {}
+            _ = bridge_to_ws => {}
+        }
+    });
+
+    (Box::new(app_r), Box::new(app_w))
 }
 
 fn parse_link_options(u: &Url) -> Result<LinkOptions> {
